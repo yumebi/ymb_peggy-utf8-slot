@@ -304,6 +304,14 @@ static int hook_one(HMODULE mod, const HookDef *h)
     return 0;
 }
 
+int Hook_Iat(HMODULE mod, const char *dll, const char *name, void *repl, void **orig)
+{
+    HookDef d = { dll, name, repl, orig };
+    return hook_one(mod, &d);
+}
+
+void Fs_Install(HMODULE exe);
+
 __declspec(dllexport) void DllInit(void) {}
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
@@ -319,6 +327,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
         for (size_t i = 0; i < sizeof g_hooks / sizeof g_hooks[0]; i++)
             if (mask & (1ul << i)) hook_one(exe, &g_hooks[i]);
         if (mask & (1ul << 11)) Ime_Init(inst);
+        if (mask & (1ul << 12)) Fs_Install(exe);
     }
     return TRUE;
 }

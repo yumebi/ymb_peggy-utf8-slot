@@ -24,12 +24,19 @@ typedef struct _FILE_OPAQUE FILE;
 #define LOAD_RVA_LO 0x000BF530u
 #define LOAD_RVA_HI 0x000BFD30u
 
+WCHAR *Fs_PathW(const char *a, WCHAR *stk, int cap);
+void Slot_Log(const char *fmt, ...);
+
 FILE *(__cdecl *o_fopen)(const char *, const char *);
 int (__cdecl *o_fclose)(FILE *);
 
 static uint8_t *read_file(const char *path, DWORD *len)
 {
-    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    WCHAR sp[1024];
+    WCHAR *wp = Fs_PathW(path, sp, 1024);
+    HANDLE h = wp ? CreateFileW(wp, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL)
+                  : CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (wp && wp != sp) HeapFree(GetProcessHeap(), 0, wp);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     DWORD n = GetFileSize(h, NULL), got = 0;
     uint8_t *b = NULL;
@@ -43,7 +50,11 @@ static uint8_t *read_file(const char *path, DWORD *len)
 
 static int write_file(const char *path, const void *data, DWORD n)
 {
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    WCHAR sp[1024];
+    WCHAR *wp = Fs_PathW(path, sp, 1024);
+    HANDLE h = wp ? CreateFileW(wp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+                  : CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (wp && wp != sp) HeapFree(GetProcessHeap(), 0, wp);
     if (h == INVALID_HANDLE_VALUE) return 0;
     DWORD w = 0;
     int ok = WriteFile(h, data, n, &w, NULL) && w == n;
@@ -142,7 +153,23 @@ static void fix_saved(const char *path)
 __attribute__((noinline)) FILE *__cdecl Io_fopen(const char *path, const char *mode)
 {
     uintptr_t ra = (uintptr_t)__builtin_return_address(0);
-    FILE *f = o_fopen(path, mode);
+    FILE *f;
+    Slot_Log("fopen: %s mode=%s", path ? path : "(null)", mode ? mode : "(null)");
+    {
+        WCHAR sp[1024];
+        WCHAR *wp = path ? Fs_PathW(path, sp, 1024) : NULL;
+        FILE *(__cdecl *wfopen)(const WCHAR *, const WCHAR *) = NULL;
+        if (wp) {
+            HMODULE crt = GetModuleHandleA("MSVCRT.dll");
+            if (crt) wfopen = (FILE *(__cdecl *)(const WCHAR *, const WCHAR *))GetProcAddress(crt, "_wfopen");
+        }
+        if (wp && wfopen && mode) {
+            WCHAR wm[16];
+            MultiByteToWideChar(CP_ACP, 0, mode, -1, wm, 16);
+            f = wfopen(wp, wm);
+        } else f = o_fopen(path, mode);
+        if (wp && wp != sp) HeapFree(GetProcessHeap(), 0, wp);
+    }
     if (!f || !path || !mode) return f;
     uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
     int rd = strchr(mode, 'r') != NULL && strchr(mode, '+') == NULL;

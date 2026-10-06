@@ -90,6 +90,13 @@ static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (rest) return CallWindowProcA(old, h, m, w, rest);
         return 0;
     }
+    if (m == SELFTEST_MSG && w == 2) {
+        HWND root = GetAncestor(h, GA_ROOT);
+        SendMessageA(h, WM_CHAR, 'x', 1);
+        Slot_Log("selftest: typed x, saving via WM_COMMAND from root=%p", root);
+        SendMessageA(root, WM_COMMAND, 0xE103, 0);
+        return 0;
+    }
     if (m == SELFTEST_MSG && w == 1) {
         HIMC imc = ImmGetContext(h);
         if (imc) {
@@ -162,7 +169,7 @@ static DWORD WINAPI SelfTestThread(LPVOID p)
         Slot_Log("selftest: focus=%p", gi.hwndFocus);
         char mode[8] = "";
         GetEnvironmentVariableA("SLOT_SELFTEST", mode, sizeof mode);
-        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : 0, 0);
+        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : 0), 0);
     } else Slot_Log("selftest: no focus window");
     return 0;
 }
