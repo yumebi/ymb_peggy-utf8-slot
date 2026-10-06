@@ -19,7 +19,8 @@ fi
 mkdir -p build dist
 
 $CC -O2 -Wall -shared -static -Wl,--kill-at -o build/utf8slot.dll \
-    src/hook.c src/slot.c src/io.c src/ime.c src/fs.c -luser32 -lgdi32 -limm32 -lshell32
+    src/hook.c src/slot.c src/io.c src/ime.c src/fs.c src/dlg.c \
+    -luser32 -lgdi32 -limm32 -lshell32 -ladvapi32 -lcomdlg32
 $CC -O2 -Wall -o build/test.exe src/test.c src/slot.c -static -luser32
 ./build/test.exe
 

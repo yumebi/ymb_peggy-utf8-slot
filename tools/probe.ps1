@@ -1,4 +1,4 @@
-param([string]$Dir = "peggy_test", [string]$Keys = "", [string]$mask = "127", [string]$File = "", [int]$Wait = 6, [string]$Tag = "p")
+param([string]$Dir = "peggy_test", [string]$Keys = "", [string]$mask = "127", [string]$File = "", [int]$Wait = 6, [string]$Tag = "p", [int]$Post = 0, [switch]$Close)
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
@@ -48,7 +48,7 @@ public class FG { [DllImport("user32.dll")] public static extern bool SetForegro
   foreach ($k in $Keys.Split("|")) { [System.Windows.Forms.SendKeys]::SendWait($k); Start-Sleep -Milliseconds 1500 }
   Start-Sleep -Seconds 1
 }
-Start-Sleep -Seconds 1
+Start-Sleep -Seconds (1 + $Post)
 "exited=$($p.HasExited)"
 $i = 0
 foreach ($h in [W2]::ForPid([uint32]$p.Id)) {
@@ -65,4 +65,5 @@ foreach ($h in [W2]::ForPid([uint32]$p.Id)) {
     $out = Join-Path $PSScriptRoot "out\${Tag}_$i.png"; $bmp.Save($out); "  saved $out"; $i++
   }
 }
+if ($Close -and -not $p.HasExited) { $p.CloseMainWindow() | Out-Null; $p.WaitForExit(8000) | Out-Null }
 if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }

@@ -311,6 +311,7 @@ int Hook_Iat(HMODULE mod, const char *dll, const char *name, void *repl, void **
 }
 
 void Fs_Install(HMODULE exe);
+void Dlg_Install(HMODULE exe);
 
 __declspec(dllexport) void DllInit(void) {}
 
@@ -328,6 +329,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
             if (mask & (1ul << i)) hook_one(exe, &g_hooks[i]);
         if (mask & (1ul << 11)) Ime_Init(inst);
         if (mask & (1ul << 12)) Fs_Install(exe);
+        if (mask & (1ul << 13)) Dlg_Install(exe);
     }
     return TRUE;
 }

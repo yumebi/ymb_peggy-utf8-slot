@@ -11,12 +11,14 @@
  */
 #include "slot.h"
 #include <imm.h>
+#include <shlobj.h>
 #include <stdint.h>
 #include <string.h>
 
 #define MAXSUB 256
 static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
+static DWORD WINAPI DlgDriver(LPVOID p);
 static void ll_on(void);
 static void ll_off(void);
 #define SELFTEST_MSG (WM_USER + 0x4242)
@@ -90,6 +92,32 @@ static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (rest) return CallWindowProcA(old, h, m, w, rest);
         return 0;
     }
+    if (m == SELFTEST_MSG && w == 4) {
+        /* simulate Explorer dropping the file named by SLOT_SELFTEST_FILE (a wide DROPFILES) */
+        WCHAR file[1024] = L"";
+        GetEnvironmentVariableW(L"SLOT_SELFTEST_FILE", file, 1024);
+        SIZE_T chars = (SIZE_T)lstrlenW(file);
+        HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + (chars + 2) * sizeof(WCHAR));
+        if (g) {
+            DROPFILES *d = (DROPFILES *)GlobalLock(g);
+            d->pFiles = sizeof(DROPFILES);
+            d->fWide = TRUE;
+            memcpy((BYTE *)d + sizeof(DROPFILES), file, chars * sizeof(WCHAR));
+            GlobalUnlock(g);
+            HWND root = GetAncestor(h, GA_ROOT);
+            Slot_Log("selftest: posting WM_DROPFILES to %p", root);
+            PostMessageA(root, WM_DROPFILES, (WPARAM)g, 0);
+        }
+        return 0;
+    }
+    if (m == SELFTEST_MSG && w == 3) {
+        HWND root = GetAncestor(h, GA_ROOT);
+        CreateThread(NULL, 0, DlgDriver, NULL, 0, NULL);
+        Slot_Log("selftest: File>Open via WM_COMMAND");
+        SendMessageA(root, WM_COMMAND, 0xE101, 0);
+        Slot_Log("selftest: dialog returned");
+        return 0;
+    }
     if (m == SELFTEST_MSG && w == 2) {
         HWND root = GetAncestor(h, GA_ROOT);
         SendMessageA(h, WM_CHAR, 'x', 1);
@@ -133,6 +161,7 @@ static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
             BOOL r2 = ImmNotifyIME(imc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
             Slot_Log("selftest: set=%d complete=%d", r1, r2);
             ImmReleaseContext(h, imc);
+            if (GetEnvironmentVariableA("SLOT_SELFTEST_SAVE", NULL, 0)) SendMessageA(GetAncestor(h, GA_ROOT), WM_COMMAND, 0xE103, 0);
         }
         return 0;
     }
@@ -169,8 +198,44 @@ static DWORD WINAPI SelfTestThread(LPVOID p)
         Slot_Log("selftest: focus=%p", gi.hwndFocus);
         char mode[8] = "";
         GetEnvironmentVariableA("SLOT_SELFTEST", mode, sizeof mode);
-        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : 0), 0);
+        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : (mode[0] == 'o' ? 3 : (mode[0] == 'd' ? 4 : 0))), 0);
     } else Slot_Log("selftest: no focus window");
+    return 0;
+}
+
+static BOOL CALLBACK LogChild(HWND h, LPARAM l)
+{
+    WCHAR c[64] = L"", t[64] = L"";
+    GetClassNameW(h, c, 64);
+    GetWindowTextW(h, t, 64);
+    char u[160]; WideCharToMultiByte(CP_UTF8, 0, t, -1, u, sizeof u, NULL, NULL);
+    Slot_Log("  child %p id=%04x class=%ls text=%s", h, GetDlgCtrlID(h), c, u);
+    (void)l;
+    return TRUE;
+}
+
+static DWORD WINAPI DlgDriver(LPVOID p)
+{
+    (void)p;
+    Sleep(3500);
+    GUITHREADINFO gi; gi.cbSize = sizeof gi;
+    if (!GetGUIThreadInfo(g_ui_tid, &gi) || !gi.hwndActive) { Slot_Log("dlgdriver: no active window"); return 0; }
+    WCHAR cls[64] = L"", ttl[128] = L"", file[1024] = L"";
+    GetClassNameW(gi.hwndActive, cls, 64);
+    GetWindowTextW(gi.hwndActive, ttl, 128);
+    Slot_Log("dlgdriver: active=%p class=%ls", gi.hwndActive, cls);
+    EnumChildWindows(gi.hwndActive, LogChild, 0);
+    GetEnvironmentVariableW(L"SLOT_SELFTEST_FILE", file, 1024);
+    HWND edit = NULL;
+    {
+        HWND cb = GetDlgItem(gi.hwndActive, 0x47c);        /* ComboBoxEx32 "File name" */
+        if (cb) edit = FindWindowExW(cb, NULL, L"ComboBox", NULL);
+        if (edit) edit = FindWindowExW(edit, NULL, L"Edit", NULL);
+    }
+    BOOL r = edit ? (BOOL)SendMessageW(edit, WM_SETTEXT, 0, (LPARAM)file) : FALSE;
+    Slot_Log("dlgdriver: set filename=%d", r);
+    Sleep(600);
+    PostMessageW(gi.hwndActive, WM_COMMAND, IDOK, 0);
     return 0;
 }
 

@@ -331,7 +331,7 @@ static char *__cdecl f_fullpath(char *abs, const char *rel, size_t max)
 
 /* ---- shell32 / user32 ------------------------------------------------------------------ */
 static UINT (WINAPI *o_DragQueryFileA)(HDROP, UINT, LPSTR, UINT);
-static UINT WINAPI f_DragQueryFileA(HDROP h, UINT i, LPSTR buf, UINT cap)
+UINT WINAPI Fs_DragQueryFileA(HDROP h, UINT i, LPSTR buf, UINT cap)
 {
     if (i == 0xFFFFFFFFu) return o_DragQueryFileA(h, i, buf, cap);
     UINT n = DragQueryFileW(h, i, NULL, 0);
@@ -357,6 +357,8 @@ static UINT WINAPI f_DragQueryFileA(HDROP h, UINT i, LPSTR buf, UINT cap)
     HeapFree(GetProcessHeap(), 0, w);
     return ret;
 }
+
+void Fs_SetDragQueryOrig(void *p) { if (!o_DragQueryFileA) o_DragQueryFileA = (UINT (WINAPI *)(HDROP, UINT, LPSTR, UINT))p; }
 
 static HINSTANCE (WINAPI *o_ShellExecuteA)(HWND, LPCSTR, LPCSTR, LPCSTR, LPCSTR, INT);
 static HINSTANCE WINAPI f_ShellExecuteA(HWND hwnd, LPCSTR op, LPCSTR file, LPCSTR par, LPCSTR dir, INT show)
@@ -436,7 +438,7 @@ static FsHook g_fs_exe[] = {            /* only the exe imports these */
     { "MSVCRT.dll", "_rmdir",    (void *)f_rmdir,  (void **)&o_rmdir },
     { "MSVCRT.dll", "_chdir",    (void *)f_chdir,  (void **)&o_chdir },
     { "MSVCRT.dll", "_fullpath", (void *)f_fullpath, (void **)&o_fullpath },
-    { "SHELL32.dll", "DragQueryFileA", (void *)f_DragQueryFileA, (void **)&o_DragQueryFileA },
+    { "SHELL32.dll", "DragQueryFileA", (void *)Fs_DragQueryFileA, (void **)&o_DragQueryFileA },
     { "SHELL32.dll", "ShellExecuteA",  (void *)f_ShellExecuteA,  (void **)&o_ShellExecuteA },
 };
 
