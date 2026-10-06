@@ -1,0 +1,26 @@
+# build outputs
+build/
+dist/
+out/
+
+# Peggy is proprietary software: never commit the original exe, a patched copy, or its DLLs
+*.exe
+*.dll
+*.chm
+*.pdf
+
+# analysis artifacts derived from the proprietary binary
+gproj/
+*.rep
+*.gpr
+out/*.c
+
+# local toolchains
+tools/ghidra*/
+tools/jdk/
+tools/llvm/
+
+# local test copies
+peggy_test*/
+inst_test/
+*.log
