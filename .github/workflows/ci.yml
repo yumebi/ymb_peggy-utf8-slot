@@ -1,0 +1,61 @@
+name: build
+
+# Builds utf8slot.dll with a pinned llvm-mingw and runs the unit tests.
+# Peggy itself is not available here, so the patched exe / installer and the UI tests are built and run locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  LLVM_MINGW_TAG: "20260922"
+  LLVM_MINGW_SHA256: "e3ad77d117a4bea19a7a3b333341824d79a5a371004a10e25b8504e7b3047666"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch llvm-mingw (pinned, checksum verified)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/llvm-mingw-$env:LLVM_MINGW_TAG-ucrt-x86_64.zip"
+          Invoke-WebRequest $url -OutFile llvm.zip
+          $h = (Get-FileHash llvm.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:LLVM_MINGW_SHA256) { throw "llvm-mingw checksum mismatch: $h" }
+          Expand-Archive llvm.zip -DestinationPath tools
+          $bin = (Resolve-Path "tools/llvm-mingw-$env:LLVM_MINGW_TAG-ucrt-x86_64/bin").Path
+          Add-Content $env:GITHUB_PATH $bin
+
+      - name: Build utf8slot.dll
+        shell: bash
+        run: |
+          mkdir -p build
+          i686-w64-mingw32-clang -O2 -Wall -Werror=implicit-function-declaration -shared -static -Wl,--kill-at \
+            -o build/utf8slot.dll src/hook.c src/slot.c src/io.c src/ime.c src/fs.c src/dlg.c src/pgrep.c \
+            -luser32 -lgdi32 -limm32 -lshell32 -ladvapi32 -lcomdlg32
+
+      - name: Unit tests (slot table, persistence across processes)
+        shell: bash
+        env:
+          SLOT_ASSUME_ACP932: "1"      # the runner is not a Japanese Windows
+        run: |
+          i686-w64-mingw32-clang -O2 -Wall -o build/test.exe src/test.c src/slot.c -static -luser32
+          ./build/test.exe
+
+      - name: Check the import patcher
+        shell: bash
+        run: |
+          python -m pip install pefile
+          python -m py_compile tools/patch_import.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: utf8slot-dll
+          path: build/utf8slot.dll
+          if-no-files-found: error

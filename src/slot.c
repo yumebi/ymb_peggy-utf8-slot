@@ -30,7 +30,7 @@ void Slot_Init(void)
     if (done) return;
     done = 1;
     InitializeCriticalSection(&g_cs);
-    g_acp932 = (GetACP() == CP_SJIS);
+    g_acp932 = (GetACP() == CP_SJIS) || GetEnvironmentVariableA("SLOT_ASSUME_ACP932", NULL, 0);   /* the second is for CI / tests */
     memset(g_pair2slot, 0xFF, sizeof g_pair2slot);
     memset(g_hash, 0xFF, sizeof g_hash);
     if (!g_acp932) return;

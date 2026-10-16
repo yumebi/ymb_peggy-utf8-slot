@@ -270,6 +270,8 @@ static const unsigned g_equiv[][2] = {
     { 0x00AC, 0xFFE2 },     /* NOT SIGN             / FULLWIDTH NOT SIGN */
     { 0x2014, 0x2015 },     /* EM DASH              / HORIZONTAL BAR */
     { 0x00A6, 0xFFE4 },     /* BROKEN BAR           / FULLWIDTH BROKEN BAR */
+    { 0x203E, 0xFFE3 },     /* OVERLINE             / FULLWIDTH MACRON */
+    { 0x00A5, 0xFFE5 },     /* YEN SIGN             / FULLWIDTH YEN SIGN */
 };
 #define FIND_DLG_COMBO   3002       /* "検索する文字列" */
 #define FIND_DLG_REGEX   3007       /* "正規表現(&E)" */
