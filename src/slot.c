@@ -308,11 +308,12 @@ static int has_slot_pair(const uint8_t *s, int cb)
 
 int WINAPI Slot_MultiByteToWideChar(UINT cp, DWORD fl, LPCCH src, int cb, LPWSTR dst, int cch)
 {
+    UINT acp = (g_acp932 && cp == CP_ACP) ? CP_SJIS : cp;       /* identical on a Japanese system; keeps tests independent of the ACP */
     if (!g_acp932 || (cp != CP_ACP && cp != CP_SJIS) || !src || g_nused == 0)
-        return MultiByteToWideChar(cp, fl, src, cb, dst, cch);
+        return MultiByteToWideChar(acp, fl, src, cb, dst, cch);
     if (cb < 0) cb = lstrlenA(src) + 1;
     const uint8_t *s = (const uint8_t *)src;
-    if (!has_slot_pair(s, cb)) return MultiByteToWideChar(cp, fl, src, cb, dst, cch);
+    if (!has_slot_pair(s, cb)) return MultiByteToWideChar(acp, fl, src, cb, dst, cch);
 
     int out = 0, i = 0;
     while (i < cb) {
