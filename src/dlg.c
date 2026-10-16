@@ -453,6 +453,32 @@ static int is_text_msg(UINT m)
     return 0;
 }
 
+/* An ANSI-procedure ComboBox whose Edit is Unicode (the toolbar search box, the search dialog): its list
+ * strings have to be real UTF-16 too, or the Edit shows the slot pairs as private-use glyphs when an item is
+ * selected.  The system's own combo procedure is called directly, as a W message to MFC's ANSI one would be
+ * converted to the ACP on the way. */
+static int wide_combo(HWND h)
+{
+    char c[16];
+    HWND e;
+    if (IsWindowUnicode(h) || !GetClassNameA(h, c, sizeof c) || lstrcmpiA(c, "ComboBox")) return 0;
+    e = FindWindowExA(h, NULL, "Edit", NULL);
+    return e && IsWindowUnicode(e);
+}
+
+static LRESULT send_w(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+    static WNDPROC sysCombo;
+    if (IsWindowUnicode(h)) return SendMessageW(h, m, wp, lp);
+    if (!sysCombo) {
+        WNDCLASSW wc;
+        if (GetClassInfoW(NULL, L"ComboBox", &wc)) sysCombo = wc.lpfnWndProc;
+    }
+    char c[16];
+    if (sysCombo && GetClassNameA(h, c, sizeof c) && !lstrcmpiA(c, "ComboBox")) return CallWindowProcW(sysCombo, h, m, wp, lp);
+    return SendMessageW(h, m, wp, lp);
+}
+
 /* returns 1 and sets *res when the message was handled through the W API */
 static int unicode_text_msg(HWND h, UINT m, WPARAM wp, LPARAM lp, LRESULT *res)
 {
@@ -468,7 +494,7 @@ static int unicode_text_msg(HWND h, UINT m, WPARAM wp, LPARAM lp, LRESULT *res)
     if (m == WM_GETTEXT || m == WM_GETTEXTLENGTH || m == WM_SETTEXT) {
         tgt = text_source(h);                          /* window text: also reaches into an ANSI ComboBox */
         if (!tgt) return 0;
-    } else if (!IsWindowUnicode(h)) return 0;
+    } else if (!IsWindowUnicode(h) && !wide_combo(h)) return 0;
 
     switch (m) {
     case WM_GETTEXT: case WM_GETTEXTLENGTH: {
@@ -481,11 +507,11 @@ static int unicode_text_msg(HWND h, UINT m, WPARAM wp, LPARAM lp, LRESULT *res)
     case CB_GETLBTEXT: case CB_GETLBTEXTLEN: case LB_GETTEXT: case LB_GETTEXTLEN: {
         int isCb = (m == CB_GETLBTEXT || m == CB_GETLBTEXTLEN);
         UINT lenMsg = isCb ? CB_GETLBTEXTLEN : LB_GETTEXTLEN, getMsg = isCb ? CB_GETLBTEXT : LB_GETTEXT;
-        LRESULT n = SendMessageW(h, lenMsg, wp, 0);
+        LRESULT n = send_w(h, lenMsg, wp, 0);
         if (n < 0) return 0;
         WCHAR *w = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ((SIZE_T)n + 2) * sizeof(WCHAR));
         int hit = 0;
-        if (w && SendMessageW(h, getMsg, wp, (LPARAM)w) >= 0 && has_nonnative(w)) {
+        if (w && send_w(h, getMsg, wp, (LPARAM)w) >= 0 && has_nonnative(w)) {
             hit = 1;
             *res = (m == getMsg) ? copy_ansi(w, (char *)lp, 0x7FFFFFFF) : (LRESULT)(w2a(w, NULL, 0) - 1);
         }
@@ -495,7 +521,7 @@ static int unicode_text_msg(HWND h, UINT m, WPARAM wp, LPARAM lp, LRESULT *res)
     default:                                   /* messages that carry a string to the control */
         if (lp && has_slot_n((const char *)lp, lstrlenA((const char *)lp))) {
             WCHAR *w = a2w_dup((const char *)lp, -1);
-            *res = SendMessageW(tgt, m, wp, (LPARAM)w);
+            *res = send_w(tgt, m, wp, (LPARAM)w);
             hfree(w);
             return 1;
         }
@@ -619,6 +645,80 @@ static FARPROC WINAPI f_GetProcAddress(HMODULE m, LPCSTR n)
     return p;
 }
 
+/* ---- the toolbar search box as a Unicode control ----------------------------------------------
+ * An ANSI ComboBox keeps its Edit's text as ANSI, so a slot character (a private-use pair for USER32)
+ * is drawn as an empty box.  Created through CreateWindowExW the Edit is Unicode (MFC then swaps the
+ * combo's own window procedure to its ANSI one, which is the state the search dialog is in already),
+ * and the text hooks above show real characters. */
+static HWND (WINAPI *o_CreateWindowExA)(DWORD, LPCSTR, LPCSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
+static LONG (WINAPI *o_SetWindowLongA)(HWND, int, LONG);
+static volatile LONG g_defer_on;                 /* the toolbar combo is being created */
+static LONG g_deferred_proc;
+static HWND g_tb_combo;                          /* the toolbar search box, once created */
+
+/* MFC swaps in its own (ANSI) window procedure while the window is being created, and a ComboBox creates its
+ * Edit as ANSI when it already looks ANSI at that moment.  So the swap is held back until the window exists. */
+static LONG WINAPI f_SetWindowLongA(HWND h, int idx, LONG v)
+{
+    char c[16];
+    if (g_defer_on && idx == GWL_WNDPROC && GetClassNameA(h, c, sizeof c) && !lstrcmpiA(c, "ComboBox")) {
+        g_deferred_proc = v;
+        return GetWindowLongA(h, GWL_WNDPROC);
+    }
+    if (idx == GWL_WNDPROC && g_tb_combo && IsWindowUnicode(h) && GetParent(h) == g_tb_combo && GetClassNameA(h, c, sizeof c) &&
+        !lstrcmpiA(c, "Edit")) {
+        Slot_Log("toolbar search box: MFC subclassing of the inner Edit skipped");
+        return GetWindowLongW(h, GWL_WNDPROC);
+    }
+    return o_SetWindowLongA(h, idx, v);
+}
+
+static HWND WINAPI f_CreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD style, int x, int y, int w, int h,
+                                     HWND parent, HMENU menu, HINSTANCE inst, LPVOID param)
+{
+    if (!IS_INTRESOURCE(cls) && (style & WS_CHILD) && (UINT_PTR)menu == FIND_TOOLBAR_COMBO && !lstrcmpiA(cls, "ComboBox")) {
+        WCHAR *wn = (name && !IS_INTRESOURCE(name)) ? a2w_dup(name, -1) : NULL;
+        HWND r;
+        g_deferred_proc = 0;
+        InterlockedExchange(&g_defer_on, 1);
+        r = CreateWindowExW(ex, L"ComboBox", wn, style, x, y, w, h, parent, menu, inst, param);
+        InterlockedExchange(&g_defer_on, 0);
+        hfree(wn);
+        if (r && g_deferred_proc) o_SetWindowLongA(r, GWL_WNDPROC, g_deferred_proc);
+        g_tb_combo = r;
+        {
+            HWND e = r ? FindWindowExA(r, NULL, "Edit", NULL) : NULL;
+            Slot_Log("toolbar search box created as Unicode: %p (proc swap %s) combo_unicode=%d edit=%p edit_unicode=%d", r,
+                     g_deferred_proc ? "deferred" : "none", r ? IsWindowUnicode(r) : -1, e, e ? IsWindowUnicode(e) : -1);
+        }
+        if (r) return r;
+    }
+    return o_CreateWindowExA(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
+}
+
+/* ---- About box: say that this is the patched build ------------------------------------------- */
+static BOOL CALLBACK about_child(HWND c, LPARAM l)
+{
+    WCHAR t[160];
+    char cls[16];
+    (void)l;
+    if (!GetClassNameA(c, cls, sizeof cls) || lstrcmpiA(cls, "Static")) return TRUE;
+    if (GetWindowTextW(c, t, 160) <= 0 || wcsncmp(t, L"Peggy Pro Version", 17) != 0 || wcsstr(t, L" + ")) return TRUE;
+    {
+        WCHAR add[48];
+        wsprintfW(add, L" + %hs %hs", SLOT_PATCH_NAME, SLOT_PATCH_VER);
+        lstrcatW(t, add);
+    }
+    SetWindowTextW(c, t);
+    return FALSE;
+}
+
+void Dlg_PatchAbout(HWND dlg)
+{
+    char c[16];
+    if (dlg && GetClassNameA(dlg, c, sizeof c) && !lstrcmpA(c, "#32770")) EnumChildWindows(dlg, about_child, 0);
+}
+
 void Dlg_Install(HMODULE exe)
 {
     HMODULE mfc = GetModuleHandleA("MFC42.DLL");
@@ -630,6 +730,11 @@ void Dlg_Install(HMODULE exe)
     r[4] = Hook_Iat(exe, "USER32.dll",   "SendMessageA",     (void *)f_SendMessageA,     (void **)&o_SendMessageA);
     r[5] = mfc ? Hook_Iat(mfc, "USER32.dll", "SendMessageA", (void *)f_SendMessageA, (void **)&o_SendMessageA) : -1;
     r[6] = mfc ? Hook_Iat(mfc, "KERNEL32.dll", "GetProcAddress", (void *)f_GetProcAddress, (void **)&o_GetProcAddress) : -1;
+    Hook_Iat(exe, "USER32.dll", "CreateWindowExA", (void *)f_CreateWindowExA, (void **)&o_CreateWindowExA);
+    if (mfc) {
+        Hook_Iat(mfc, "USER32.dll", "CreateWindowExA", (void *)f_CreateWindowExA, (void **)&o_CreateWindowExA);
+        Slot_Log("SetWindowLongA hook in mfc42: %d", Hook_Iat(mfc, "USER32.dll", "SetWindowLongA", (void *)f_SetWindowLongA, (void **)&o_SetWindowLongA));
+    }
     Hook_Iat(exe, "USER32.dll", "GetWindowTextA",       (void *)f_GetWindowTextA,       (void **)&o_GetWindowTextA);
     Hook_Iat(exe, "USER32.dll", "GetWindowTextLengthA", (void *)f_GetWindowTextLengthA, (void **)&o_GetWindowTextLengthA);
     if (mfc) {

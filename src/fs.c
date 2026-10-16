@@ -389,8 +389,25 @@ static int is_control_class(const char *c)
     return 0;
 }
 
+/* The main frame caption "Peggy Pro - [file]" gets the patch name appended to the product name. */
+static LPCSTR patch_title(HWND h, LPCSTR s, char *buf, int cap)
+{
+    static const char prod[] = "Peggy Pro", tag[] = " (" SLOT_PATCH_NAME ")";
+    char cls[32];
+    if (!s || strncmp(s, prod, sizeof prod - 1) != 0) return s;
+    if (strncmp(s + sizeof prod - 1, tag, sizeof tag - 1) == 0) return s;
+    if (!GetClassNameA(h, cls, sizeof cls) || lstrcmpA(cls, "PeggyProWindowClass")) return s;
+    if ((int)(lstrlenA(s) + sizeof tag) >= cap) return s;
+    memcpy(buf, prod, sizeof prod - 1);
+    memcpy(buf + sizeof prod - 1, tag, sizeof tag - 1);
+    lstrcpyA(buf + sizeof prod - 1 + sizeof tag - 1, s + sizeof prod - 1);
+    return buf;
+}
+
 static BOOL WINAPI f_SetWindowTextA(HWND h, LPCSTR s)
 {
+    char tbuf[PBUF * 2];
+    s = patch_title(h, s, tbuf, sizeof tbuf);
     Dlg_TraceText("SetWindowTextA", h, s);
     WCHAR st[PBUF];
     WCHAR *w = Fs_PathW(s, st, PBUF);      /* same slot-aware conversion */

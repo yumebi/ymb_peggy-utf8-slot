@@ -20,6 +20,7 @@
 static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
 void Dlg_NoteFindDlg(HWND h);
+void Dlg_PatchAbout(HWND h);
 int Dlg_TestGetWindowText(HWND h, char *buf, int cap);
 LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static void log_menu_tree(HMENU m, int depth);
@@ -50,7 +51,18 @@ void Slot_Log(const char *fmt, ...);
 static void feed_cp(HWND h, unsigned cp, int post)
 {
     unsigned char b[2];
-    int n = Slot_CodePointToAnsi(cp, b, NULL);
+    int n;
+    if (IsWindowUnicode(h)) {                         /* Unicode edit: plain UTF-16 units, no slot detour */
+        WCHAR u[2]; int k = 1;
+        if (cp >= 0x10000) { u[0] = (WCHAR)(0xD800 + ((cp - 0x10000) >> 10)); u[1] = (WCHAR)(0xDC00 + ((cp - 0x10000) & 0x3FF)); k = 2; }
+        else u[0] = (WCHAR)cp;
+        for (int i = 0; i < k; i++) {
+            if (post) PostMessageW(h, WM_CHAR, u[i], 1);
+            else SendMessageW(h, WM_CHAR, u[i], 1);
+        }
+        return;
+    }
+    n = Slot_CodePointToAnsi(cp, b, NULL);
     if (n == 0) { b[0] = '?'; n = 1; }
     Slot_Log("feed cp=%x n=%d b0=%02x b1=%02x used=%d", cp, n, b[0], b[1], Slot_Used());
     for (int i = 0; i < n; i++) {
@@ -130,6 +142,33 @@ static int paste_unicode(HWND h)
     SendMessageA(h, EM_REPLACESEL, TRUE, (LPARAM)ansi);
     HeapFree(GetProcessHeap(), 0, ansi);
     return 1;
+}
+
+/* Unicode Edit controls (the toolbar search box, the inner Edits of the search dialog).  The system's own handling
+ * of text is right for them, except that Peggy fetches messages with the ANSI APIs, which reduces typed characters
+ * to the ACP - so IME results are inserted here as real UTF-16. */
+static LRESULT CALLBACK UniProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    WNDPROC old = find_old(h);
+    if (!old) return DefWindowProcW(h, m, w, l);
+    if (m == WM_IME_COMPOSITION && (l & GCS_RESULTSTR)) {
+        HIMC imc = ImmGetContext(h);
+        LONG bytes = imc ? ImmGetCompositionStringW(imc, GCS_RESULTSTR, NULL, 0) : 0;
+        WCHAR *t = bytes > 0 ? (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytes + 2) : NULL;
+        if (t) {
+            ImmGetCompositionStringW(imc, GCS_RESULTSTR, t, bytes);
+            SendMessageW(h, EM_REPLACESEL, TRUE, (LPARAM)t);
+            HeapFree(GetProcessHeap(), 0, t);
+        }
+        if (imc) ImmReleaseContext(h, imc);
+        if (t) {
+            LPARAM rest = l & ~(LPARAM)(GCS_RESULTSTR | GCS_RESULTREADSTR | GCS_RESULTCLAUSE | GCS_RESULTREADCLAUSE);
+            return rest ? CallWindowProcW(old, h, m, w, rest) : 0;
+        }
+    }
+    if (m == SELFTEST_MSG) { feed_cp(h, 0x301C, 0); feed_cp(h, 0x1F600, 0); return 0; }      /* what the packet hook feeds */
+    if (m == WM_NCDESTROY) drop_sub(h);
+    return CallWindowProcW(old, h, m, w, l);
 }
 
 static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -269,16 +308,19 @@ static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
 
 static void ensure_sub(HWND h)
 {
-    if (!h) return;
-    if (IsWindowUnicode(h) || find_old(h)) return;
+    int uni;
+    if (!h || find_old(h)) return;
+    uni = IsWindowUnicode(h);
+    if (uni && !is_edit(h)) return;
     if (GetWindowThreadProcessId(h, NULL) != GetCurrentThreadId()) return;
     for (int i = 0; i < MAXSUB; i++) {
         if (g_sub[i].h) continue;
-        WNDPROC old = (WNDPROC)GetWindowLongPtrA(h, GWLP_WNDPROC);
-        if (!old || old == SubProc) return;
+        WNDPROC old = uni ? (WNDPROC)GetWindowLongPtrW(h, GWLP_WNDPROC) : (WNDPROC)GetWindowLongPtrA(h, GWLP_WNDPROC);
+        if (!old || old == SubProc || old == UniProc) return;
         g_sub[i].h = h; g_sub[i].old = old;
-        SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)SubProc);
-        Slot_Log("subclassed %p", h);
+        if (uni) SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)UniProc);
+        else SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)SubProc);
+        Slot_Log("subclassed %p (%s)", h, uni ? "unicode" : "ansi");
         return;
     }
 }
@@ -541,6 +583,17 @@ static DWORD WINAPI FindDriver(LPVOID p)
         Slot_Log("finddriver: toolbar combo=%p", tb);
         if (tb) {
             HWND te0 = FindWindowExA(tb, NULL, "Edit", NULL);
+            if (!lstrcmpA(tbtext, "@feed") && te0) {                        /* packet-style input into the toolbar box */
+                WCHAR got[32] = L""; char u[200];
+                SendMessageW(te0, WM_SETFOCUS, 0, 0);
+                SendMessageW(te0, WM_SETTEXT, 0, (LPARAM)L"");
+                SendMessageA(te0, SELFTEST_MSG, 0, 0);
+                GetWindowTextW(te0, got, 32);
+                for (int i = 0, n = 0; got[i] && i < 8; i++) n += wsprintfA(u + n, "%04X ", got[i]);
+                Slot_Log("finddriver: toolbar after feed: %ls", got);
+                { int n = 0; for (int i = 0; got[i] && i < 8; i++) n += wsprintfA(u + n, "%04X ", got[i]); u[n] = 0; Slot_Log("finddriver: toolbar feed utf16=%s", u); }
+                return 0;
+            }
             if (!lstrcmpA(tbtext, "@tilde") && te0) { WCHAR tw[3] = { L'b', (WCHAR)0xFF5E, 0 }; SetWindowTextW(te0, tw); }            /* b + FULLWIDTH TILDE */
             else SendMessageA(tb, WM_SETTEXT, 0, (LPARAM)tbtext);
             HWND te = FindWindowExA(tb, NULL, "Edit", NULL);
@@ -637,7 +690,7 @@ static LRESULT CALLBACK CallWndHook(int code, WPARAM wp, LPARAM lp)
         const CWPSTRUCT *c = (const CWPSTRUCT *)lp;
         if (c->message == WM_SETFOCUS || c->message == WM_IME_SETCONTEXT || c->message == WM_IME_STARTCOMPOSITION)
             ensure_sub(c->hwnd);
-        if (c->message == WM_SHOWWINDOW && c->wParam) Dlg_NoteFindDlg(c->hwnd);
+        if (c->message == WM_SHOWWINDOW && c->wParam) { Dlg_NoteFindDlg(c->hwnd); Dlg_PatchAbout(c->hwnd); }
         else if (c->message == WM_COMMAND && (LOWORD(c->wParam) == 3007 || LOWORD(c->wParam) == 3004 || LOWORD(c->wParam) == 3001))
             Dlg_NoteFindDlg(c->hwnd);
         if (Slot_LogOn()) trace_wnd_msg(c);
