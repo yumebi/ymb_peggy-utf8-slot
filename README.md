@@ -34,7 +34,7 @@ CP932 に無い文字を、CP932 の未定義 2 バイト領域(約 3556 個の�
 | `src/hook.c` | `DllMain`。exe の IAT を差し替える。スロット文字の描画、クリップボード整合 |
 | `src/io.c` | 4 バイト UTF-8 の読み書き修復(読み込み時に CESU-8 化した一時ファイル、保存後に 4 バイトへ復元) |
 | `src/fs.c` | Unicode ファイル名。スロット文字を含むパスだけ W 版 API (`CreateFileW` など) に切り替え、列挙結果・コマンドラインはスロット化して返す |
-| `src/dlg.c` | ファイルダイアログ(`GetOpenFileNameA` を W 版へ変換、`CDM_*` メッセージも変換)とレジストリ(REG_SZ を UTF-16 で保存)。MFC42 が遅延読み込みする API は `GetProcAddress` の横取りで差し替える |
+| `src/dlg.c` | Unicode コントロール(「文字列の検索」ダイアログなど)の ANSI での読み書き(`GetWindowTextA` / `SendMessageA` を W + スロット変換にする。ANSI の ComboBox は内側の Unicode の Edit を直接読む)。ファイルダイアログ(`GetOpenFileNameA` を W 版へ変換、`CDM_*` メッセージも変換)とレジストリ(REG_SZ を UTF-16 で保存)。MFC42 が遅延読み込みする API は `GetProcAddress` の横取りで差し替える |
 | `src/ime.c` | IME 確定文字列(`WM_IME_COMPOSITION`)と Unicode パケット(`VK_PACKET`)の直接入力 |
 | `tools/patch_import.py` | exe に `utf8slot.dll!DllInit` のインポートを追加(セクション追加なし) |
 | `installer/peggy_utf8.iss` | Inno Setup 6 用インストーラー(元 exe のバックアップと、アンインストール時の復元つき) |

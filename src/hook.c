@@ -327,6 +327,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
         unsigned long mask = GetEnvironmentVariableA("SLOT_MASK", mb, sizeof mb) ? strtoul(mb, NULL, 0) : ~0ul;
         for (size_t i = 0; i < sizeof g_hooks / sizeof g_hooks[0]; i++)
             if (mask & (1ul << i)) hook_one(exe, &g_hooks[i]);
+        /* MFC42.DLL converts Unicode <-> ANSI itself (CString, window text of Unicode controls) */
+        {
+            HMODULE mfc = GetModuleHandleA("MFC42.DLL");
+            for (size_t i = 0; mfc && i < sizeof g_hooks / sizeof g_hooks[0]; i++)
+                if ((mask & (1ul << i)) && (!strcmp(g_hooks[i].name, "MultiByteToWideChar") ||
+                                            !strcmp(g_hooks[i].name, "WideCharToMultiByte")))
+                    Slot_Log("mfc42 %s: %d", g_hooks[i].name, hook_one(mfc, &g_hooks[i]));
+        }
         if (mask & (1ul << 11)) Ime_Init(inst);
         if (mask & (1ul << 12)) Fs_Install(exe);
         if (mask & (1ul << 13)) Dlg_Install(exe);

@@ -191,6 +191,155 @@ static BOOL ofn_run(LPOPENFILENAMEA a, int save)
 static BOOL WINAPI f_GetOpenFileNameA(LPOPENFILENAMEA a) { return a ? ofn_run(a, 0) : o_GetOpenFileNameA(a); }
 static BOOL WINAPI f_GetSaveFileNameA(LPOPENFILENAMEA a) { return a ? ofn_run(a, 1) : o_GetSaveFileNameA(a); }
 
+
+/* ---- ANSI text access to Unicode windows --------------------------------------------------
+ * Some Peggy dialogs (e.g. the search dialog) contain Unicode controls - sometimes an ANSI ComboBox
+ * whose inner Edit is Unicode.  Peggy reads them with the ANSI APIs, which would turn every
+ * character CP932 cannot express into '?'.  For such windows the W API is used (on the inner Edit
+ * for a ComboBox) and the text is returned as ANSI+slots; strings with slot characters that Peggy
+ * stores into them (history lists) are converted to real UTF-16.  CP932-only text is untouched. */
+static int has_nonnative(const WCHAR *w)
+{
+    for (const WCHAR *p = w; *p; p++) {
+        unsigned cp = *p;
+        if (cp < 0x80) continue;
+        if (cp >= 0xD800 && cp < 0xDC00 && p[1] >= 0xDC00 && p[1] < 0xE000) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (p[1] - 0xDC00); p++;
+        }
+        if (!Slot_IsNative(cp)) return 1;
+    }
+    return 0;
+}
+
+/* the window whose text is really Unicode: h itself, or the inner Edit of an ANSI ComboBox */
+static HWND text_source(HWND h)
+{
+    char c[24];
+    if (!h) return NULL;
+    if (IsWindowUnicode(h)) return h;
+    if (GetClassNameA(h, c, sizeof c) && !lstrcmpiA(c, "ComboBox")) {
+        HWND e = FindWindowExA(h, NULL, "Edit", NULL);
+        if (e && IsWindowUnicode(e)) return e;
+    }
+    return NULL;
+}
+
+/* copies at most cap-1 bytes (never splitting a double-byte pair); returns the byte count */
+static int copy_ansi(const WCHAR *w, char *buf, int cap)
+{
+    int need = w2a(w, NULL, 0);
+    if (need <= 0 || cap <= 0) return 0;
+    char *tmp = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)need);
+    if (!tmp) return 0;
+    w2a(w, tmp, need);
+    int len = need - 1, n = len < cap - 1 ? len : cap - 1;
+    if (n < len) {
+        int i = 0;
+        while (i < n) i += (IsDBCSLeadByte((BYTE)tmp[i]) && i + 1 < len) ? 2 : 1;
+        if (i > n) n = i - 2;
+    }
+    memcpy(buf, tmp, (size_t)n);
+    buf[n] = 0;
+    HeapFree(GetProcessHeap(), 0, tmp);
+    return n;
+}
+
+static WCHAR *get_wtext(HWND h)
+{
+    int n = GetWindowTextLengthW(h);
+    WCHAR *w = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ((SIZE_T)n + 2) * sizeof(WCHAR));
+    if (w && n > 0) GetWindowTextW(h, w, n + 1);
+    return w;
+}
+
+static int (WINAPI *o_GetWindowTextA)(HWND, LPSTR, int);
+static int (WINAPI *o_GetWindowTextLengthA)(HWND);
+
+static int WINAPI f_GetWindowTextA(HWND h, LPSTR buf, int cap)
+{
+    HWND src = text_source(h);
+    if (src) {
+        WCHAR *w = get_wtext(src);
+        if (w && has_nonnative(w)) {
+            int n = copy_ansi(w, buf, cap);
+            hfree(w);
+            return n;
+        }
+        hfree(w);
+    }
+    return o_GetWindowTextA(h, buf, cap);
+}
+
+static int WINAPI f_GetWindowTextLengthA(HWND h)
+{
+    HWND src = text_source(h);
+    if (src) {
+        WCHAR *w = get_wtext(src);
+        if (w && has_nonnative(w)) {
+            int n = w2a(w, NULL, 0) - 1;
+            hfree(w);
+            return n < 0 ? 0 : n;
+        }
+        hfree(w);
+    }
+    return o_GetWindowTextLengthA(h);
+}
+
+static int is_text_msg(UINT m)
+{
+    switch (m) {
+    case WM_GETTEXT: case WM_GETTEXTLENGTH: case WM_SETTEXT: case EM_REPLACESEL:
+    case CB_GETLBTEXT: case CB_GETLBTEXTLEN: case CB_ADDSTRING: case CB_INSERTSTRING:
+    case CB_FINDSTRING: case CB_FINDSTRINGEXACT: case CB_SELECTSTRING:
+    case LB_GETTEXT: case LB_GETTEXTLEN: case LB_ADDSTRING: case LB_INSERTSTRING:
+    case LB_FINDSTRING: case LB_FINDSTRINGEXACT: case LB_SELECTSTRING:
+        return 1;
+    }
+    return 0;
+}
+
+/* returns 1 and sets *res when the message was handled through the W API */
+static int unicode_text_msg(HWND h, UINT m, WPARAM wp, LPARAM lp, LRESULT *res)
+{
+    HWND tgt = h;
+    if (m == WM_GETTEXT || m == WM_GETTEXTLENGTH || m == WM_SETTEXT) {
+        tgt = text_source(h);                          /* window text: also reaches into an ANSI ComboBox */
+        if (!tgt) return 0;
+    } else if (!IsWindowUnicode(h)) return 0;
+
+    switch (m) {
+    case WM_GETTEXT: case WM_GETTEXTLENGTH: {
+        WCHAR *w = get_wtext(tgt);
+        int hit = w && has_nonnative(w);
+        if (hit) *res = (m == WM_GETTEXT) ? copy_ansi(w, (char *)lp, (int)wp) : (LRESULT)(w2a(w, NULL, 0) - 1);
+        hfree(w);
+        return hit;
+    }
+    case CB_GETLBTEXT: case CB_GETLBTEXTLEN: case LB_GETTEXT: case LB_GETTEXTLEN: {
+        int isCb = (m == CB_GETLBTEXT || m == CB_GETLBTEXTLEN);
+        UINT lenMsg = isCb ? CB_GETLBTEXTLEN : LB_GETTEXTLEN, getMsg = isCb ? CB_GETLBTEXT : LB_GETTEXT;
+        LRESULT n = SendMessageW(h, lenMsg, wp, 0);
+        if (n < 0) return 0;
+        WCHAR *w = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ((SIZE_T)n + 2) * sizeof(WCHAR));
+        int hit = 0;
+        if (w && SendMessageW(h, getMsg, wp, (LPARAM)w) >= 0 && has_nonnative(w)) {
+            hit = 1;
+            *res = (m == getMsg) ? copy_ansi(w, (char *)lp, 0x7FFFFFFF) : (LRESULT)(w2a(w, NULL, 0) - 1);
+        }
+        hfree(w);
+        return hit;
+    }
+    default:                                   /* messages that carry a string to the control */
+        if (lp && has_slot_n((const char *)lp, lstrlenA((const char *)lp))) {
+            WCHAR *w = a2w_dup((const char *)lp, -1);
+            *res = SendMessageW(tgt, m, wp, (LPARAM)w);
+            hfree(w);
+            return 1;
+        }
+        return 0;
+    }
+}
+
 /* CDM_* messages carry strings: CDM_GETSPEC..CDM_GETFOLDERPATH (read), CDM_SETCONTROLTEXT, CDM_SETDEFEXT (write) */
 static LRESULT (WINAPI *o_SendMessageA)(HWND, UINT, WPARAM, LPARAM);
 static LRESULT WINAPI f_SendMessageA(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -212,6 +361,10 @@ static LRESULT WINAPI f_SendMessageA(HWND h, UINT m, WPARAM wp, LPARAM lp)
             hfree(w);
             return r;
         }
+    }
+    if (is_text_msg(m)) {
+        LRESULT r;
+        if (unicode_text_msg(h, m, wp, lp, &r)) return r;
     }
     return o_SendMessageA(h, m, wp, lp);
 }
@@ -308,6 +461,16 @@ void Dlg_Install(HMODULE exe)
     r[4] = Hook_Iat(exe, "USER32.dll",   "SendMessageA",     (void *)f_SendMessageA,     (void **)&o_SendMessageA);
     r[5] = mfc ? Hook_Iat(mfc, "USER32.dll", "SendMessageA", (void *)f_SendMessageA, (void **)&o_SendMessageA) : -1;
     r[6] = mfc ? Hook_Iat(mfc, "KERNEL32.dll", "GetProcAddress", (void *)f_GetProcAddress, (void **)&o_GetProcAddress) : -1;
+    Hook_Iat(exe, "USER32.dll", "GetWindowTextA",       (void *)f_GetWindowTextA,       (void **)&o_GetWindowTextA);
+    Hook_Iat(exe, "USER32.dll", "GetWindowTextLengthA", (void *)f_GetWindowTextLengthA, (void **)&o_GetWindowTextLengthA);
+    if (mfc) {
+        Hook_Iat(mfc, "USER32.dll", "GetWindowTextA",       (void *)f_GetWindowTextA,       (void **)&o_GetWindowTextA);
+        Hook_Iat(mfc, "USER32.dll", "GetWindowTextLengthA", (void *)f_GetWindowTextLengthA, (void **)&o_GetWindowTextLengthA);
+    }
     Slot_Log("dlg hooks: open=%d save=%d regset=%d regquery=%d sendmsg=%d/%d getprocaddr=%d",
              r[0], r[1], r[2], r[3], r[4], r[5], r[6]);
 }
+
+/* self-test helpers: run the same code the hooks run */
+int Dlg_TestGetWindowText(HWND h, char *buf, int cap) { return f_GetWindowTextA(h, buf, cap); }
+LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp) { return f_SendMessageA(h, m, wp, lp); }

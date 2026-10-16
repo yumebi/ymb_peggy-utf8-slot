@@ -14,10 +14,13 @@
 #include <shlobj.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define MAXSUB 256
 static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
+int Dlg_TestGetWindowText(HWND h, char *buf, int cap);
+LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static DWORD WINAPI DlgDriver(LPVOID p);
 static DWORD WINAPI FindDriver(LPVOID p);
 static void ll_on(void);
@@ -139,10 +142,22 @@ static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
     if (m == SELFTEST_MSG && w == 5) {
         /* open the first item of the 3rd top-level menu (Search) and paste into its edit box */
         HWND root = GetAncestor(h, GA_ROOT);
-        HMENU bar = GetMenu(root), sub = bar ? GetSubMenu(bar, 2) : NULL;
-        UINT id = sub ? GetMenuItemID(sub, 0) : 0;
+        char mnu[8] = "2";
+        GetEnvironmentVariableA("SLOT_FIND_MENU", mnu, sizeof mnu);
+        HMENU bar = GetMenu(root), sub = bar ? GetSubMenu(bar, atoi(mnu)) : NULL;
+        char itm[8] = "0";
+        GetEnvironmentVariableA("SLOT_FIND_ITEM", itm, sizeof itm);
+        UINT id = sub ? GetMenuItemID(sub, atoi(itm)) : 0;
         Slot_Log("selftest: search menu item id=%u", id);
-        if (sub) for (int i = 0; i < 6; i++) Slot_Log("  menu item %d id=%u", i, GetMenuItemID(sub, i));
+        if (sub) {
+            int cnt = GetMenuItemCount(sub);
+            for (int i = 0; i < cnt && i < 40; i++) {
+                WCHAR t[96] = L""; char u[300];
+                GetMenuStringW(sub, i, t, 96, MF_BYPOSITION);
+                WideCharToMultiByte(CP_UTF8, 0, t, -1, u, sizeof u, NULL, NULL);
+                Slot_Log("  menu item %d id=%u text=%s", i, GetMenuItemID(sub, i), u);
+            }
+        }
         if (id && id != (UINT)-1) {
             CreateThread(NULL, 0, FindDriver, NULL, 0, NULL);
             SendMessageA(root, WM_COMMAND, id, 0);
@@ -313,6 +328,48 @@ static void log_hex(const char *tag, const char *s)
     Slot_Log("%s: %s", tag, hex);
 }
 
+static BOOL CALLBACK LogEditProc(HWND h, LPARAM l)
+{
+    char c[32];
+    (void)l;
+    GetClassNameA(h, c, sizeof c);
+    if (!lstrcmpiA(c, "Edit") || !lstrcmpiA(c, "ComboBox") || !lstrcmpiA(c, "ComboBoxEx32") || !lstrcmpiA(c, "RichEdit20A") || !lstrcmpiA(c, "RichEdit20W"))
+        Slot_Log("  ctrl %p id=%04x class=%s unicode=%d", h, GetDlgCtrlID(h), c, IsWindowUnicode(h));
+    return TRUE;
+}
+
+static BOOL CALLBACK FindNextBtnProc(HWND h, LPARAM l)
+{
+    WCHAR c[32] = L"", x[64] = L"";
+    GetClassNameW(h, c, 32);
+    if (lstrcmpiW(c, L"Button")) return TRUE;
+    GetWindowTextW(h, x, 64);
+    if (x[0] == 0x6B21 && x[1] == 0x3092 && !*(HWND *)l) *(HWND *)l = h;      /* next (tsugi) wo kensaku */
+    return TRUE;
+}
+
+static BOOL CALLBACK StatusBarProc(HWND h, LPARAM l)
+{
+    WCHAR c[32] = L"";
+    GetClassNameW(h, c, 32);
+    if (!lstrcmpiW(c, L"msctls_statusbar32") && !*(HWND *)l) *(HWND *)l = h;
+    return TRUE;
+}
+
+static void log_statusbar(HWND root)
+{
+    HWND sb = NULL;
+    EnumChildWindows(root, StatusBarProc, (LPARAM)&sb);
+    if (!sb) { Slot_Log("finddriver: no status bar"); return; }
+    int parts = (int)SendMessageW(sb, 0x406 /* SB_GETPARTS */, 0, 0);
+    for (int i = 0; i < parts && i < 8; i++) {
+        WCHAR t[96] = L""; char u[300];
+        SendMessageW(sb, 0x40D /* SB_GETTEXTW */, i, (LPARAM)t);
+        WideCharToMultiByte(CP_UTF8, 0, t, -1, u, sizeof u, NULL, NULL);
+        Slot_Log("  status[%d] = %s", i, u);
+    }
+}
+
 static DWORD WINAPI FindDriver(LPVOID p)
 {
     (void)p;
@@ -321,7 +378,14 @@ static DWORD WINAPI FindDriver(LPVOID p)
     if (!GetGUIThreadInfo(g_ui_tid, &gi) || !gi.hwndActive) { Slot_Log("finddriver: no active window"); return 0; }
     HWND dlg = gi.hwndActive, edit = NULL;
     EnumChildWindows(dlg, FirstEditProc, (LPARAM)&edit);
-    Slot_Log("finddriver: dlg=%p edit=%p", dlg, edit);
+    {
+        WCHAR ttl[128] = L""; char u[300];
+        GetWindowTextW(dlg, ttl, 128);
+        WideCharToMultiByte(CP_UTF8, 0, ttl, -1, u, sizeof u, NULL, NULL);
+        Slot_Log("finddriver: title=%s", u);
+    }
+    EnumChildWindows(dlg, LogEditProc, 0);
+    Slot_Log("finddriver: dlg=%p edit=%p edit_unicode=%d", dlg, edit, edit ? IsWindowUnicode(edit) : -1);
     if (!edit) return 0;
 
     SendMessageA(edit, WM_SETFOCUS, 0, 0);               /* lets the lazy sub-classing see this window */
@@ -343,6 +407,32 @@ static DWORD WINAPI FindDriver(LPVOID p)
     buf[0] = 0; SendMessageA(edit, WM_GETTEXT, sizeof buf, (LPARAM)buf);
     log_hex("finddriver: after Ctrl+V", buf);
 
+    /* what Peggy sees through its ANSI calls (hooked paths) */
+    {
+        char b2[64] = "";
+        int n = Dlg_TestGetWindowText(edit, b2, sizeof b2);
+        Slot_Log("finddriver: hooked GetWindowTextA returned %d", n);
+        log_hex("finddriver: hooked GetWindowTextA text", b2);
+        b2[0] = 0;
+        LRESULT r = Dlg_TestSendMessage(edit, WM_GETTEXT, sizeof b2, (LPARAM)b2);
+        Slot_Log("finddriver: hooked WM_GETTEXT returned %d", (int)r);
+        log_hex("finddriver: hooked WM_GETTEXT text", b2);
+        Slot_Log("finddriver: hooked WM_GETTEXTLENGTH = %d", (int)Dlg_TestSendMessage(edit, WM_GETTEXTLENGTH, 0, 0));
+    }
+
+    /* really search: paste again, press "find next", then read the caret column */
+    SendMessageA(edit, WM_SETTEXT, 0, (LPARAM)"");
+    SendMessageA(edit, WM_PASTE, 0, 0);
+    HWND btn = NULL, owner = GetWindow(dlg, GW_OWNER);
+    EnumChildWindows(dlg, FindNextBtnProc, (LPARAM)&btn);
+    Slot_Log("finddriver: next button=%p owner=%p", btn, owner);
+    if (owner) log_statusbar(owner);
+    if (btn) {
+        SendMessageW(btn, BM_CLICK, 0, 0);
+        Sleep(1200);
+        Slot_Log("finddriver: after find next:");
+        if (owner) log_statusbar(owner);
+    }
     PostMessageW(dlg, WM_CLOSE, 0, 0);
     return 0;
 }
