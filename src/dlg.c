@@ -252,6 +252,7 @@ static WCHAR *get_wtext(HWND h)
     return w;
 }
 
+static void trace_text(const char *tag, HWND h, UINT m, const char *str, LRESULT res);
 static int (WINAPI *o_GetWindowTextA)(HWND, LPSTR, int);
 static int (WINAPI *o_GetWindowTextLengthA)(HWND);
 
@@ -267,7 +268,11 @@ static int WINAPI f_GetWindowTextA(HWND h, LPSTR buf, int cap)
         }
         hfree(w);
     }
-    return o_GetWindowTextA(h, buf, cap);
+    {
+        int r = o_GetWindowTextA(h, buf, cap);
+        trace_text("GetWindowTextA", h, 0, buf, r);
+        return r;
+    }
 }
 
 static int WINAPI f_GetWindowTextLengthA(HWND h)
@@ -283,6 +288,21 @@ static int WINAPI f_GetWindowTextLengthA(HWND h)
         hfree(w);
     }
     return o_GetWindowTextLengthA(h);
+}
+
+
+/* ---- debug trace of text traffic to edit-like controls (only when SLOT_DEBUG is set) ---- */
+int Slot_LogOn(void);
+static void trace_text(const char *tag, HWND h, UINT m, const char *str, LRESULT res)
+{
+    char c[24], hex[120]; int n = 0;
+    if (!Slot_LogOn() || !h) return;
+    GetClassNameA(h, c, sizeof c);
+    if (lstrcmpiA(c, "Edit") && lstrcmpiA(c, "ComboBox") && lstrcmpiA(c, "ComboBoxEx32")) return;
+    if (str) for (int i = 0; str[i] && i < 40; i++) n += wsprintfA(hex + n, "%02X", (unsigned char)str[i]);
+    hex[n] = 0;
+    Slot_Log("TEXT %s hwnd=%p id=%04x class=%s unicode=%d msg=%04x res=%d bytes=%s", tag, h, GetDlgCtrlID(h), c,
+             IsWindowUnicode(h), m, (int)res, hex);
 }
 
 static int is_text_msg(UINT m)
@@ -364,7 +384,13 @@ static LRESULT WINAPI f_SendMessageA(HWND h, UINT m, WPARAM wp, LPARAM lp)
     }
     if (is_text_msg(m)) {
         LRESULT r;
-        if (unicode_text_msg(h, m, wp, lp, &r)) return r;
+        int setter = (m == WM_SETTEXT || m == EM_REPLACESEL || m == CB_ADDSTRING || m == CB_INSERTSTRING ||
+                      m == CB_FINDSTRING || m == CB_FINDSTRINGEXACT || m == CB_SELECTSTRING);
+        if (setter) trace_text("SendMessageA set", h, m, (const char *)lp, 0);
+        if (unicode_text_msg(h, m, wp, lp, &r)) { trace_text("  (handled via W)", h, m, NULL, r); return r; }
+        r = o_SendMessageA(h, m, wp, lp);
+        if (m == WM_GETTEXT) trace_text("SendMessageA get", h, m, (const char *)lp, r);
+        return r;
     }
     return o_SendMessageA(h, m, wp, lp);
 }
@@ -474,3 +500,5 @@ void Dlg_Install(HMODULE exe)
 /* self-test helpers: run the same code the hooks run */
 int Dlg_TestGetWindowText(HWND h, char *buf, int cap) { return f_GetWindowTextA(h, buf, cap); }
 LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp) { return f_SendMessageA(h, m, wp, lp); }
+
+void Dlg_TraceText(const char *tag, HWND h, const char *str) { trace_text(tag, h, 0, str, 0); }

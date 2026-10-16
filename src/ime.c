@@ -21,6 +21,9 @@ static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
 int Dlg_TestGetWindowText(HWND h, char *buf, int cap);
 LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp);
+static void log_menu_tree(HMENU m, int depth);
+static DWORD WINAPI PrefillDriver(LPVOID p);
+static DWORD WINAPI CtrlFDriver(LPVOID p);
 static DWORD WINAPI DlgDriver(LPVOID p);
 static DWORD WINAPI FindDriver(LPVOID p);
 static void ll_on(void);
@@ -137,6 +140,25 @@ static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
     if (m == WM_IME_COMPOSITION && (l & GCS_RESULTSTR) && handle_result(h)) {
         LPARAM rest = l & ~(LPARAM)(GCS_RESULTSTR | GCS_RESULTREADSTR | GCS_RESULTCLAUSE | GCS_RESULTREADCLAUSE);
         if (rest) return CallWindowProcA(old, h, m, w, rest);
+        return 0;
+    }
+    if (m == SELFTEST_MSG && w == 8) {
+        CreateThread(NULL, 0, CtrlFDriver, NULL, 0, NULL);
+        return 0;
+    }
+    if (m == SELFTEST_MSG && w == 7) {
+        HWND root = GetAncestor(h, GA_ROOT);
+        Slot_Log("selftest: select all (57642), then open search dialog (57636)");
+        SendMessageA(root, WM_COMMAND, 57642, 0);
+        CreateThread(NULL, 0, PrefillDriver, NULL, 0, NULL);
+        SendMessageA(root, WM_COMMAND, 57636, 0);
+        return 0;
+    }
+    if (m == SELFTEST_MSG && w == 6) {
+        HWND root = GetAncestor(h, GA_ROOT);
+        HMENU bar = GetMenu(root);
+        Slot_Log("selftest: menu tree");
+        if (bar) log_menu_tree(bar, 0);
         return 0;
     }
     if (m == SELFTEST_MSG && w == 5) {
@@ -270,7 +292,7 @@ static DWORD WINAPI SelfTestThread(LPVOID p)
         Slot_Log("selftest: focus=%p", gi.hwndFocus);
         char mode[8] = "";
         GetEnvironmentVariableA("SLOT_SELFTEST", mode, sizeof mode);
-        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : (mode[0] == 'o' ? 3 : (mode[0] == 'd' ? 4 : (mode[0] == 'f' ? 5 : 0)))), 0);
+        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : (mode[0] == 'o' ? 3 : (mode[0] == 'd' ? 4 : (mode[0] == 'f' ? 5 : (mode[0] == 'm' ? 6 : (mode[0] == 'p' ? 7 : (mode[0] == 'c' ? 8 : 0))))))), 0);
     } else Slot_Log("selftest: no focus window");
     return 0;
 }
@@ -370,6 +392,90 @@ static void log_statusbar(HWND root)
     }
 }
 
+static void log_menu_tree(HMENU m, int depth)
+{
+    int cnt = GetMenuItemCount(m);
+    for (int i = 0; i < cnt && i < 80; i++) {
+        WCHAR t[120] = L""; char u[360];
+        GetMenuStringW(m, i, t, 120, MF_BYPOSITION);
+        WideCharToMultiByte(CP_UTF8, 0, t, -1, u, sizeof u, NULL, NULL);
+        UINT id = GetMenuItemID(m, i);
+        if (u[0]) Slot_Log("  menu[%d] %s  id=%u", depth, u, id);
+        HMENU sub = GetSubMenu(m, i);
+        if (sub && depth < 3) log_menu_tree(sub, depth + 1);
+    }
+}
+
+static BOOL CALLBACK DumpEditProc(HWND h, LPARAM l)
+{
+    char c[32];
+    (void)l;
+    GetClassNameA(h, c, sizeof c);
+    if (!lstrcmpiA(c, "Edit")) {
+        WCHAR w[200] = L""; char hex[400]; int n = 0;
+        GetWindowTextW(h, w, 200);
+        for (int i = 0; w[i] && n < 380; i++) n += wsprintfA(hex + n, "%04X ", w[i]);
+        hex[n] = 0;
+        Slot_Log("  Edit %p id=%04x unicode=%d text(UTF-16)=%s", h, GetDlgCtrlID(h), IsWindowUnicode(h), hex);
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI PrefillDriver(LPVOID p)
+{
+    (void)p;
+    Sleep(3500);
+    GUITHREADINFO gi; gi.cbSize = sizeof gi;
+    if (!GetGUIThreadInfo(g_ui_tid, &gi) || !gi.hwndActive) { Slot_Log("prefill: no active window"); return 0; }
+    WCHAR t[128] = L"";
+    GetWindowTextW(gi.hwndActive, t, 128);
+    char u[300]; WideCharToMultiByte(CP_UTF8, 0, t, -1, u, sizeof u, NULL, NULL);
+    Slot_Log("prefill: active title=%s", u);
+    EnumChildWindows(gi.hwndActive, DumpEditProc, 0);
+    HWND root = GetAncestor(gi.hwndActive, GA_ROOTOWNER);
+    if (root) EnumChildWindows(root, DumpEditProc, 0);
+    PostMessageW(gi.hwndActive, WM_CLOSE, 0, 0);
+    return 0;
+}
+
+static BOOL CALLBACK FindIdProc(HWND h, LPARAM l)
+{
+    HWND *r = (HWND *)l;
+    char c[24];
+    if (!*r && GetDlgCtrlID(h) == 8018 && GetClassNameA(h, c, sizeof c) && !lstrcmpiA(c, "ComboBox")) *r = h;
+    return TRUE;
+}
+
+static void log_toolbar_search(HWND root, const char *tag)
+{
+    HWND combo = NULL;
+    EnumChildWindows(root, FindIdProc, (LPARAM)&combo);
+    HWND edit = combo ? FindWindowExA(combo, NULL, "Edit", NULL) : NULL;
+    char buf[200] = "";
+    if (edit) SendMessageA(edit, WM_GETTEXT, sizeof buf, (LPARAM)buf);
+    Slot_Log("%s: toolbar combo=%p edit=%p", tag, combo, edit);
+    if (edit) log_hex(tag, buf);
+}
+
+static DWORD WINAPI CtrlFDriver(LPVOID p)
+{
+    (void)p;
+    Sleep(2500);
+    GUITHREADINFO gi; gi.cbSize = sizeof gi;
+    HWND root = NULL;
+    if (GetGUIThreadInfo(g_ui_tid, &gi) && gi.hwndActive) root = GetAncestor(gi.hwndActive, GA_ROOTOWNER);
+    if (!root) { Slot_Log("ctrlf: no window"); return 0; }
+    log_toolbar_search(root, "ctrlf: before");
+    SendMessageA(root, WM_COMMAND, 57642, 0);                 /* select all */
+    Sleep(300);
+    SendMessageA(root, WM_COMMAND, 32786, 0);                 /* FindTool = Ctrl+F, 1st press */
+    Sleep(1200);
+    log_toolbar_search(root, "ctrlf: after 1st Ctrl+F");
+    CreateThread(NULL, 0, PrefillDriver, NULL, 0, NULL);
+    SendMessageA(root, WM_COMMAND, 32786, 0);                 /* 2nd press -> search dialog */
+    return 0;
+}
+
 static DWORD WINAPI FindDriver(LPVOID p)
 {
     (void)p;
@@ -437,12 +543,44 @@ static DWORD WINAPI FindDriver(LPVOID p)
     return 0;
 }
 
+int Slot_LogOn(void);
+
+/* debug: every text-related message that reaches an edit/combo box (SLOT_DEBUG only) */
+static void trace_wnd_msg(const CWPSTRUCT *c)
+{
+    char cls[24], hex[200]; int n = 0, show = 0;
+    UINT m = c->message;
+    if (m != WM_SETTEXT && m != EM_REPLACESEL && m != WM_CHAR && m != WM_PASTE && m != WM_CUT && m != WM_COPY &&
+        m != WM_CLEAR && m != CB_SETEDITSEL && m != EM_SETSEL && m != CB_SETCURSEL && m != CB_SELECTSTRING &&
+        m != WM_IME_COMPOSITION && m != CB_ADDSTRING && m != CB_INSERTSTRING)
+        return;
+    if (!GetClassNameA(c->hwnd, cls, sizeof cls)) return;
+    if (lstrcmpiA(cls, "Edit") && lstrcmpiA(cls, "ComboBox")) return;
+    if (m == WM_SETTEXT || m == EM_REPLACESEL || m == CB_SELECTSTRING || m == CB_ADDSTRING || m == CB_INSERTSTRING) {
+        show = 1;
+        if (c->lParam) {
+            if (IsWindowUnicode(c->hwnd)) {
+                const WCHAR *w = (const WCHAR *)c->lParam;
+                for (int i = 0; w[i] && i < 30; i++) n += wsprintfA(hex + n, "%04X ", w[i]);
+            } else {
+                const unsigned char *a = (const unsigned char *)c->lParam;
+                for (int i = 0; a[i] && i < 40; i++) n += wsprintfA(hex + n, "%02X", a[i]);
+            }
+        }
+    }
+    hex[n] = 0;
+    if (m == CB_ADDSTRING || m == CB_INSERTSTRING) return;       /* history population is noisy */
+    Slot_Log("MSG hwnd=%p id=%04x %s unicode=%d msg=%04X wp=%X %s%s", c->hwnd, GetDlgCtrlID(c->hwnd), cls,
+             IsWindowUnicode(c->hwnd), m, (unsigned)c->wParam, show ? "text=" : "", hex);
+}
+
 static LRESULT CALLBACK CallWndHook(int code, WPARAM wp, LPARAM lp)
 {
     if (code >= 0) {
         const CWPSTRUCT *c = (const CWPSTRUCT *)lp;
         if (c->message == WM_SETFOCUS || c->message == WM_IME_SETCONTEXT || c->message == WM_IME_STARTCOMPOSITION)
             ensure_sub(c->hwnd);
+        if (Slot_LogOn()) trace_wnd_msg(c);
         if (c->message == WM_ACTIVATEAPP) { if (c->wParam) ll_on(); else ll_off(); }
     }
     return CallNextHookEx(g_hook, code, wp, lp);

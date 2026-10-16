@@ -380,15 +380,39 @@ static HINSTANCE WINAPI f_ShellExecuteA(HWND hwnd, LPCSTR op, LPCSTR file, LPCST
 }
 
 static BOOL (WINAPI *o_SetWindowTextA)(HWND, LPCSTR);
+void Dlg_TraceText(const char *tag, HWND h, const char *str);
+static int is_control_class(const char *c)
+{
+    static const char *const k[] = { "Edit", "ComboBox", "ComboBoxEx32", "ComboLBox", "ListBox", "Static", "Button",
+                                     "RichEdit20A", "RichEdit20W", "SysTabControl32", "ScrollBar", NULL };
+    for (int i = 0; k[i]; i++) if (!lstrcmpiA(c, k[i])) return 1;
+    return 0;
+}
+
 static BOOL WINAPI f_SetWindowTextA(HWND h, LPCSTR s)
 {
-    if (s && strlen(s) > 12) log_path("SetWindowTextA", s);
+    Dlg_TraceText("SetWindowTextA", h, s);
     WCHAR st[PBUF];
     WCHAR *w = Fs_PathW(s, st, PBUF);      /* same slot-aware conversion */
     if (!w) return o_SetWindowTextA(h, s);
-    /* An ANSI window gets WM_SETTEXT converted to the ACP (lossy) by the system, so store the
-     * Unicode caption through DefWindowProcW directly. */
-    BOOL r = IsWindowUnicode(h) ? SetWindowTextW(h, w) : (DefWindowProcW(h, WM_SETTEXT, 0, (LPARAM)w) != 0);
+    BOOL r;
+    char cls[32] = "";
+    GetClassNameA(h, cls, sizeof cls);
+    if (is_control_class(cls)) {
+        /* A control keeps its own text buffer, so DefWindowProc would be ignored (the old text stays).
+         * Unicode control (or the Unicode edit inside an ANSI combo box): hand it the real UTF-16.
+         * ANSI control: store the slot bytes, exactly as a paste/IME input would. */
+        HWND tgt = h;
+        if (!IsWindowUnicode(h) && !lstrcmpiA(cls, "ComboBox")) {
+            HWND e = FindWindowExA(h, NULL, "Edit", NULL);
+            if (e && IsWindowUnicode(e)) tgt = e;
+        }
+        r = IsWindowUnicode(tgt) ? SetWindowTextW(tgt, w) : o_SetWindowTextA(h, s);
+    } else {
+        /* frame / dialog caption: an ANSI window gets WM_SETTEXT converted to the ACP (lossy) by the
+         * system, so store the Unicode caption through DefWindowProcW directly. */
+        r = IsWindowUnicode(h) ? SetWindowTextW(h, w) : (DefWindowProcW(h, WM_SETTEXT, 0, (LPARAM)w) != 0);
+    }
     free_w(w, st);
     return r;
 }

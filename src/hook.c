@@ -20,6 +20,14 @@ void Slot_Log(const char *fmt, ...)
     if (h != INVALID_HANDLE_VALUE) { DWORD w; static const char crlf[2] = { 13, 10 }; WriteFile(h, buf, n, &w, NULL); WriteFile(h, crlf, 2, &w, NULL); CloseHandle(h); }
 }
 
+int Slot_LogOn(void)
+{
+    char t[8];
+    static int on = -1;
+    if (on < 0) on = GetEnvironmentVariableA("SLOT_DEBUG", t, sizeof t) ? 1 : 0;
+    return on;
+}
+
 /* ---------- IAT hooking (main module only) ---------- */
 typedef struct { const char *dll; const char *name; void *repl; void **orig; } HookDef;
 
