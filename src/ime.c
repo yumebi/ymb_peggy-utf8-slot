@@ -476,13 +476,29 @@ static DWORD WINAPI CtrlFDriver(LPVOID p)
     return 0;
 }
 
+static BOOL CALLBACK FindDlgProc(HWND h, LPARAM l)
+{
+    char c[16];
+    if (IsWindowVisible(h) && GetClassNameA(h, c, sizeof c) && !lstrcmpA(c, "#32770") && GetDlgItem(h, 3002)) {
+        *(HWND *)l = h;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static DWORD WINAPI FindDriver(LPVOID p)
 {
     (void)p;
     Sleep(3500);
     GUITHREADINFO gi; gi.cbSize = sizeof gi;
-    if (!GetGUIThreadInfo(g_ui_tid, &gi) || !gi.hwndActive) { Slot_Log("finddriver: no active window"); return 0; }
+    if (!GetGUIThreadInfo(g_ui_tid, &gi)) gi.hwndActive = NULL;
     HWND dlg = gi.hwndActive, edit = NULL;
+    if (!dlg || !GetDlgItem(dlg, 3002)) {                        /* the search dialog may not be the active window (no foreground) */
+        HWND f = NULL;
+        EnumThreadWindows(g_ui_tid, FindDlgProc, (LPARAM)&f);
+        if (f) dlg = f;
+    }
+    if (!dlg) { Slot_Log("finddriver: no dialog"); return 0; }
     EnumChildWindows(dlg, FirstEditProc, (LPARAM)&edit);
     {
         WCHAR ttl[128] = L""; char u[300];
@@ -495,6 +511,13 @@ static DWORD WINAPI FindDriver(LPVOID p)
     if (!edit) return 0;
 
     SendMessageA(edit, WM_SETFOCUS, 0, 0);               /* lets the lazy sub-classing see this window */
+    char rxv[8] = "";
+    if (GetEnvironmentVariableA("SLOT_FIND_REGEX", rxv, sizeof rxv)) {      /* "regular expression" (id 3007): 1 = on, 0 = off */
+        HWND rx = GetDlgItem(dlg, 3007);
+        int want = rxv[0] != '0';
+        if (rx && (SendMessageW(rx, BM_GETCHECK, 0, 0) == BST_CHECKED) != want) SendMessageW(rx, BM_CLICK, 0, 0);
+        Slot_Log("finddriver: regex checked=%d", rx ? (int)SendMessageW(rx, BM_GETCHECK, 0, 0) : -1);
+    }
     static const WCHAR t[] = { 0x301C, 0 };            /* WAVE DASH, not representable in CP932 */
     if (OpenClipboard(dlg)) {
         EmptyClipboard();

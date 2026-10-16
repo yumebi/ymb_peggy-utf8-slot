@@ -256,9 +256,101 @@ static void trace_text(const char *tag, HWND h, UINT m, const char *str, LRESULT
 static int (WINAPI *o_GetWindowTextA)(HWND, LPSTR, int);
 static int (WINAPI *o_GetWindowTextLengthA)(HWND);
 
+/* ---- equivalent characters in regex searches ------------------------------------------------
+ * CP932 and Unicode disagree about a few characters (U+301C WAVE DASH is not in CP932, its look-alike
+ * U+FF5E FULLWIDTH TILDE is), so the same-looking character is two different things in the buffer.
+ * With "regular expression" checked in the search dialog, each such character in the pattern is
+ * widened to a class holding both ("〜" -> "[〜～]") when the pattern is handed to Peggy. */
+static const unsigned g_equiv[][2] = {
+    { 0x301C, 0xFF5E },     /* WAVE DASH            / FULLWIDTH TILDE */
+    { 0x2016, 0x2225 },     /* DOUBLE VERTICAL LINE / PARALLEL TO */
+    { 0x2212, 0xFF0D },     /* MINUS SIGN           / FULLWIDTH HYPHEN-MINUS */
+    { 0x00A2, 0xFFE0 },     /* CENT SIGN            / FULLWIDTH CENT SIGN */
+    { 0x00A3, 0xFFE1 },     /* POUND SIGN           / FULLWIDTH POUND SIGN */
+    { 0x00AC, 0xFFE2 },     /* NOT SIGN             / FULLWIDTH NOT SIGN */
+    { 0x2014, 0x2015 },     /* EM DASH              / HORIZONTAL BAR */
+    { 0x00A6, 0xFFE4 },     /* BROKEN BAR           / FULLWIDTH BROKEN BAR */
+};
+#define FIND_DLG_COMBO   3002       /* "検索する文字列" */
+#define FIND_DLG_REGEX   3007       /* "正規表現(&E)" */
+
+static int equiv_partner(unsigned c)
+{
+    for (unsigned i = 0; i < sizeof g_equiv / sizeof g_equiv[0]; i++) {
+        if (g_equiv[i][0] == c) return (int)g_equiv[i][1];
+        if (g_equiv[i][1] == c) return (int)g_equiv[i][0];
+    }
+    return -1;
+}
+
+/* the pattern field of the search dialog (the ComboBox or its inner Edit) while "regular expression" is on */
+static int is_regex_find_pattern(HWND h)
+{
+    char c[24];
+    HWND cb = h, dlg;
+    if (!h || !GetClassNameA(h, c, sizeof c)) return 0;
+    if (!lstrcmpiA(c, "Edit")) {
+        cb = GetParent(h);
+        if (!cb || !GetClassNameA(cb, c, sizeof c)) return 0;
+    }
+    if (lstrcmpiA(c, "ComboBox") || GetDlgCtrlID(cb) != FIND_DLG_COMBO) return 0;
+    dlg = GetParent(cb);
+    if (!dlg || !GetClassNameA(dlg, c, sizeof c) || lstrcmpA(c, "#32770")) return 0;
+    return SendDlgItemMessageA(dlg, FIND_DLG_REGEX, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+/* Expands equivalent characters; NULL when the text has none (or on allocation failure). */
+static WCHAR *expand_equiv(const WCHAR *w)
+{
+    int n = lstrlenW(w), changed = 0, inClass = 0;
+    WCHAR *out = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ((SIZE_T)n * 4 + 2) * sizeof(WCHAR));
+    WCHAR *o = out;
+    if (!out) return NULL;
+    for (int i = 0; i < n; i++) {
+        WCHAR c = w[i];
+        int p;
+        if (c == L'\\' && i + 1 < n) { *o++ = c; *o++ = w[++i]; continue; }
+        if (c == L'[') inClass = 1; else if (c == L']') inClass = 0;
+        p = equiv_partner(c);
+        if (p < 0) { *o++ = c; continue; }
+        changed = 1;
+        if (!inClass) *o++ = L'[';
+        *o++ = c; *o++ = (WCHAR)p;
+        if (!inClass) *o++ = L']';
+    }
+    if (!changed) { hfree(out); return NULL; }
+    return out;
+}
+
+/* the expanded pattern text of h, or NULL when h is not a regex pattern field / nothing to expand */
+static WCHAR *regex_pattern_text(HWND h)
+{
+    HWND src;
+    WCHAR *w = NULL, *x;
+    if (!is_regex_find_pattern(h)) return NULL;
+    src = text_source(h);
+    if (src) w = get_wtext(src);
+    else {
+        int n = o_GetWindowTextLengthA(h);
+        char *a = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)n + 2);
+        if (a) { o_GetWindowTextA(h, a, n + 1); w = a2w_dup(a, -1); hfree(a); }
+    }
+    if (!w) return NULL;
+    x = expand_equiv(w);
+    hfree(w);
+    return x;
+}
+
 static int WINAPI f_GetWindowTextA(HWND h, LPSTR buf, int cap)
 {
-    HWND src = text_source(h);
+    HWND src;
+    WCHAR *x = regex_pattern_text(h);
+    if (x) {
+        int n = copy_ansi(x, buf, cap);
+        hfree(x);
+        return n;
+    }
+    src = text_source(h);
     if (src) {
         WCHAR *w = get_wtext(src);
         if (w && has_nonnative(w)) {
@@ -277,7 +369,14 @@ static int WINAPI f_GetWindowTextA(HWND h, LPSTR buf, int cap)
 
 static int WINAPI f_GetWindowTextLengthA(HWND h)
 {
-    HWND src = text_source(h);
+    HWND src;
+    WCHAR *x = regex_pattern_text(h);
+    if (x) {
+        int n = w2a(x, NULL, 0) - 1;
+        hfree(x);
+        return n < 0 ? 0 : n;
+    }
+    src = text_source(h);
     if (src) {
         WCHAR *w = get_wtext(src);
         if (w && has_nonnative(w)) {
@@ -322,6 +421,14 @@ static int is_text_msg(UINT m)
 static int unicode_text_msg(HWND h, UINT m, WPARAM wp, LPARAM lp, LRESULT *res)
 {
     HWND tgt = h;
+    if (m == WM_GETTEXT || m == WM_GETTEXTLENGTH) {
+        WCHAR *x = regex_pattern_text(h);
+        if (x) {
+            *res = (m == WM_GETTEXT) ? copy_ansi(x, (char *)lp, (int)wp) : (LRESULT)(w2a(x, NULL, 0) - 1);
+            hfree(x);
+            return 1;
+        }
+    }
     if (m == WM_GETTEXT || m == WM_GETTEXTLENGTH || m == WM_SETTEXT) {
         tgt = text_source(h);                          /* window text: also reaches into an ANSI ComboBox */
         if (!tgt) return 0;
