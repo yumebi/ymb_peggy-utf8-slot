@@ -19,6 +19,7 @@
 static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
 static DWORD WINAPI DlgDriver(LPVOID p);
+static DWORD WINAPI FindDriver(LPVOID p);
 static void ll_on(void);
 static void ll_off(void);
 #define SELFTEST_MSG (WM_USER + 0x4242)
@@ -82,14 +83,70 @@ static int handle_result(HWND h)
     return 1;
 }
 
+/* ---- paste into ANSI edit controls (search box, dialogs) ----------------------------------
+ * USER32's own edit control converts the Unicode clipboard to the ACP (best fit: U+301C becomes
+ * U+FF5E, others become '?'), so a character copied from the document never matches the slot bytes
+ * stored in the document.  Insert the slot-encoded text instead whenever the clipboard holds
+ * characters CP932 cannot express. */
+static int is_edit(HWND h)
+{
+    char c[16];
+    return GetClassNameA(h, c, sizeof c) && lstrcmpiA(c, "Edit") == 0;
+}
+
+static int paste_unicode(HWND h)
+{
+    if (GetWindowLongA(h, GWL_STYLE) & ES_READONLY) return 0;
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(h)) return 0;
+    char *ansi = NULL;
+    HANDLE hg = GetClipboardData(CF_UNICODETEXT);
+    const WCHAR *w = hg ? (const WCHAR *)GlobalLock(hg) : NULL;
+    if (w) {
+        int nonnative = 0;
+        for (const WCHAR *q = w; *q; q++) {
+            unsigned cp = *q;
+            if (cp < 0x80) continue;
+            if (cp >= 0xD800 && cp < 0xDC00 && q[1] >= 0xDC00 && q[1] < 0xE000) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (q[1] - 0xDC00); q++;
+            }
+            if (!Slot_IsNative(cp)) { nonnative = 1; break; }
+        }
+        if (nonnative) {
+            int need = Slot_WideCharToMultiByte(CP_ACP, 0, w, -1, NULL, 0, NULL, NULL);
+            if (need > 0 && (ansi = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)need)))
+                Slot_WideCharToMultiByte(CP_ACP, 0, w, -1, ansi, need, NULL, NULL);
+        }
+        GlobalUnlock(hg);
+    }
+    CloseClipboard();
+    if (!ansi) return 0;
+    SendMessageA(h, EM_REPLACESEL, TRUE, (LPARAM)ansi);
+    HeapFree(GetProcessHeap(), 0, ansi);
+    return 1;
+}
+
 static LRESULT CALLBACK SubProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     WNDPROC old = find_old(h);
     if (!old) return DefWindowProcA(h, m, w, l);
+    if ((m == WM_PASTE || (m == WM_CHAR && w == 0x16)) && is_edit(h) && paste_unicode(h)) return 0;
     if (m == WM_IME_COMPOSITION) Slot_Log("WM_IME_COMPOSITION lp=%08x", (unsigned)l);
     if (m == WM_IME_COMPOSITION && (l & GCS_RESULTSTR) && handle_result(h)) {
         LPARAM rest = l & ~(LPARAM)(GCS_RESULTSTR | GCS_RESULTREADSTR | GCS_RESULTCLAUSE | GCS_RESULTREADCLAUSE);
         if (rest) return CallWindowProcA(old, h, m, w, rest);
+        return 0;
+    }
+    if (m == SELFTEST_MSG && w == 5) {
+        /* open the first item of the 3rd top-level menu (Search) and paste into its edit box */
+        HWND root = GetAncestor(h, GA_ROOT);
+        HMENU bar = GetMenu(root), sub = bar ? GetSubMenu(bar, 2) : NULL;
+        UINT id = sub ? GetMenuItemID(sub, 0) : 0;
+        Slot_Log("selftest: search menu item id=%u", id);
+        if (sub) for (int i = 0; i < 6; i++) Slot_Log("  menu item %d id=%u", i, GetMenuItemID(sub, i));
+        if (id && id != (UINT)-1) {
+            CreateThread(NULL, 0, FindDriver, NULL, 0, NULL);
+            SendMessageA(root, WM_COMMAND, id, 0);
+        }
         return 0;
     }
     if (m == SELFTEST_MSG && w == 4) {
@@ -198,7 +255,7 @@ static DWORD WINAPI SelfTestThread(LPVOID p)
         Slot_Log("selftest: focus=%p", gi.hwndFocus);
         char mode[8] = "";
         GetEnvironmentVariableA("SLOT_SELFTEST", mode, sizeof mode);
-        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : (mode[0] == 'o' ? 3 : (mode[0] == 'd' ? 4 : 0))), 0);
+        PostMessageA(gi.hwndFocus, SELFTEST_MSG, mode[0] == 'i' ? 1 : (mode[0] == 's' ? 2 : (mode[0] == 'o' ? 3 : (mode[0] == 'd' ? 4 : (mode[0] == 'f' ? 5 : 0)))), 0);
     } else Slot_Log("selftest: no focus window");
     return 0;
 }
@@ -236,6 +293,57 @@ static DWORD WINAPI DlgDriver(LPVOID p)
     Slot_Log("dlgdriver: set filename=%d", r);
     Sleep(600);
     PostMessageW(gi.hwndActive, WM_COMMAND, IDOK, 0);
+    return 0;
+}
+
+
+static BOOL CALLBACK FirstEditProc(HWND h, LPARAM l)
+{
+    char c[32];
+    GetClassNameA(h, c, sizeof c);
+    if (lstrcmpiA(c, "Edit") == 0 && !*(HWND *)l) *(HWND *)l = h;
+    return TRUE;
+}
+
+static void log_hex(const char *tag, const char *s)
+{
+    char hex[200]; int n = 0;
+    for (int i = 0; s[i] && n < 190; i++) n += wsprintfA(hex + n, "%02X", (unsigned char)s[i]);
+    hex[n] = 0;
+    Slot_Log("%s: %s", tag, hex);
+}
+
+static DWORD WINAPI FindDriver(LPVOID p)
+{
+    (void)p;
+    Sleep(3500);
+    GUITHREADINFO gi; gi.cbSize = sizeof gi;
+    if (!GetGUIThreadInfo(g_ui_tid, &gi) || !gi.hwndActive) { Slot_Log("finddriver: no active window"); return 0; }
+    HWND dlg = gi.hwndActive, edit = NULL;
+    EnumChildWindows(dlg, FirstEditProc, (LPARAM)&edit);
+    Slot_Log("finddriver: dlg=%p edit=%p", dlg, edit);
+    if (!edit) return 0;
+
+    SendMessageA(edit, WM_SETFOCUS, 0, 0);               /* lets the lazy sub-classing see this window */
+    static const WCHAR t[] = { 0x301C, 0 };            /* WAVE DASH, not representable in CP932 */
+    if (OpenClipboard(dlg)) {
+        EmptyClipboard();
+        HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, sizeof t);
+        if (g) { memcpy(GlobalLock(g), t, sizeof t); GlobalUnlock(g); SetClipboardData(CF_UNICODETEXT, g); }
+        CloseClipboard();
+    }
+    char buf[64];
+    SendMessageA(edit, WM_SETTEXT, 0, (LPARAM)"");
+    SendMessageA(edit, WM_PASTE, 0, 0);
+    buf[0] = 0; SendMessageA(edit, WM_GETTEXT, sizeof buf, (LPARAM)buf);
+    log_hex("finddriver: after WM_PASTE", buf);
+
+    SendMessageA(edit, WM_SETTEXT, 0, (LPARAM)"");
+    SendMessageA(edit, WM_CHAR, 0x16, 0);               /* Ctrl+V */
+    buf[0] = 0; SendMessageA(edit, WM_GETTEXT, sizeof buf, (LPARAM)buf);
+    log_hex("finddriver: after Ctrl+V", buf);
+
+    PostMessageW(dlg, WM_CLOSE, 0, 0);
     return 0;
 }
 

@@ -49,7 +49,7 @@ public class FG { [DllImport("user32.dll")] public static extern bool SetForegro
   Start-Sleep -Seconds 1
 }
 Start-Sleep -Seconds (1 + $Post)
-"exited=$($p.HasExited)"
+"exited=$($p.HasExited) code=$(if ($p.HasExited) { $p.ExitCode })"
 $i = 0
 foreach ($h in [W2]::ForPid([uint32]$p.Id)) {
   $t = New-Object System.Text.StringBuilder 256; $c = New-Object System.Text.StringBuilder 256
