@@ -35,7 +35,7 @@ CP932 に無い文字を、CP932 の未定義 2 バイト領域(約 3556 個の�
 | `src/slot.c` | スロット表、UTF-16 ⇄ CP932 変換(`MultiByteToWideChar` / `WideCharToMultiByte` の置換) |
 | `src/hook.c` | `DllMain`。exe の IAT を差し替える。スロット文字の描画、クリップボード整合 |
 | `src/io.c` | 4 バイト UTF-8 の読み書き修復(読み込み時に CESU-8 化した一時ファイル、保存後に 4 バイトへ復元) |
-| `src/fs.c` | Unicode ファイル名。スロット文字を含むパスだけ W 版 API (`CreateFileW` など) に切り替え、列挙結果・コマンドラインはスロット化して返す |
+| `src/fs.c` | Unicode ファイル名。スロット文字を含むパスだけ W 版 API (`CreateFileW`・`CreateProcessW` など) に切り替え、列挙結果・コマンドラインはスロット化して返す |
 | `src/dlg.c` | Unicode コントロール(「文字列の検索」ダイアログなど)の ANSI での読み書き(`GetWindowTextA` / `SendMessageA` を W + スロット変換にする。ANSI の ComboBox は内側の Unicode の Edit を直接読む)。ファイルダイアログ(`GetOpenFileNameA` を W 版へ変換、`CDM_*` メッセージも変換)とレジストリ(REG_SZ を UTF-16 で保存)。MFC42 が遅延読み込みする API は `GetProcAddress` の横取りで差し替える |
 | `src/ime.c` | IME 確定文字列(`WM_IME_COMPOSITION`)と Unicode パケット(`VK_PACKET`)の直接入力 |
 | `tools/patch_import.py` | exe に `utf8slot.dll!DllInit` のインポートを追加(セクション追加なし) |
@@ -63,7 +63,7 @@ ISCC.exe installer/peggy_utf8.iss
 
 ## 既知の制限
 - 直接入力できる CP932 外の異なる文字は、1 セッションで約 1880 種まで(超過分は貼り付け・読み込みなら約 3556 種まで)
-- ファイル名: エクスプローラーから起動中の Peggy へ渡す経路(二重起動の転送)と、外部コマンドの起動(`CreateProcessA`)は未確認・未対応。プロジェクトファイルなど、Peggy が独自形式で ANSI のパスを書き出すものは、セッションをまたぐと文字が変わる可能性がある
+- ファイル名: エクスプローラーから起動中の Peggy へ渡す経路(二重起動の転送)は未確認・未対応。外部コマンド(`CreateProcessA`)はコマンドライン・作業フォルダーのスロット文字を Unicode にして起動するが、起動された側が ANSI で出力する結果(grep の出力にあるファイル名など)は CP932 外の文字が `?` になる。プロジェクトファイルなど、Peggy が独自形式で ANSI のパスを書き出すものは、セッションをまたぐと文字が変わる可能性がある
 - 検索ダイアログの入力欄は Unicode で表示される。ツールバーの検索窓は、作成時に Unicode 版で作り直しているので、CP932 外の文字も(絵文字はカラーで)表示される。それ以外の ANSI の入力欄に入った CP932 外の文字は、Windows の描画なので空白や四角で表示される(検索自体は動く)
 - スロット文字は常に 2 セル幅。絵文字は白黒(カラー化には Direct2D が必要)
 - 4.63(2009-12-24)専用。他のバージョンはアドレスが異なるため動作しない

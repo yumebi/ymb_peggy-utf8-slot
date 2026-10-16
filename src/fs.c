@@ -99,6 +99,72 @@ static BOOL WINAPI f_SetFileAttributesA(LPCSTR p, DWORD a)
     return r;
 }
 
+/* ---- CreateProcessA: external tools (grep, user tools, compilers) with slot characters in the command line --- */
+static WCHAR *wdup_all(const char *a)               /* always a fresh wide copy (NULL stays NULL) */
+{
+    int n;
+    WCHAR *w;
+    if (!a) return NULL;
+    n = Slot_MultiByteToWideChar(CP_ACP, 0, a, -1, NULL, 0);
+    if (n <= 0) n = 1;
+    w = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ((SIZE_T)n + 2) * sizeof(WCHAR));
+    if (w && n > 1) Slot_MultiByteToWideChar(CP_ACP, 0, a, -1, w, n);
+    return w;
+}
+
+static BOOL (WINAPI *o_CreateProcessA)(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID,
+                                       LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
+static BOOL WINAPI f_CreateProcessA(LPCSTR app, LPSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta, BOOL inh,
+                                    DWORD fl, LPVOID env, LPCSTR dir, LPSTARTUPINFOA si, LPPROCESS_INFORMATION pi)
+{
+    WCHAR *wa, *wc, *wd, *wdesk = NULL, *wtitle = NULL;
+    STARTUPINFOW sw;
+    BOOL r;
+    if (!has_slot_z(app) && !has_slot_z(cmd) && !has_slot_z(dir) && !(si && (has_slot_z(si->lpDesktop) || has_slot_z(si->lpTitle))))
+        return o_CreateProcessA(app, cmd, pa, ta, inh, fl, env, dir, si, pi);
+    log_path("CreateProcessA", cmd ? cmd : app);
+    wa = wdup_all(app); wc = wdup_all(cmd); wd = wdup_all(dir);
+    memset(&sw, 0, sizeof sw);
+    if (si) {
+        memcpy(&sw, si, sizeof sw < si->cb ? sizeof sw : si->cb);                 /* same layout up to the three strings */
+        sw.cb = sizeof sw;
+        sw.lpReserved = NULL;
+        wdesk = wdup_all(si->lpDesktop); sw.lpDesktop = wdesk;
+        wtitle = wdup_all(si->lpTitle);  sw.lpTitle = wtitle;
+    } else sw.cb = sizeof sw;
+    r = CreateProcessW(wa, wc, pa, ta, inh, fl, env, wd, &sw, pi);
+    HeapFree(GetProcessHeap(), 0, wa); HeapFree(GetProcessHeap(), 0, wc); HeapFree(GetProcessHeap(), 0, wd);
+    HeapFree(GetProcessHeap(), 0, wdesk); HeapFree(GetProcessHeap(), 0, wtitle);
+    return r;
+}
+BOOL Fs_TestCreateProcess(LPSTR cmd, LPPROCESS_INFORMATION pi)       /* self-test: the same code the hook runs */
+{
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    return f_CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, pi);
+}
+
+/* the current directory may hold slot characters too */
+static DWORD (WINAPI *o_GetCurrentDirectoryA)(DWORD, LPSTR);
+static DWORD WINAPI f_GetCurrentDirectoryA(DWORD cap, LPSTR buf)
+{
+    WCHAR w[PBUF * 2];
+    DWORD n = GetCurrentDirectoryW(ARRAYSIZE(w), w);
+    int need;
+    if (n == 0 || n >= ARRAYSIZE(w)) return o_GetCurrentDirectoryA(cap, buf);
+    {
+        int i, nonnative = 0;
+        for (i = 0; w[i]; i++) if (w[i] >= 0x80 && !Slot_IsNative(w[i])) { nonnative = 1; break; }
+        if (!nonnative) return o_GetCurrentDirectoryA(cap, buf);
+    }
+    need = w2a(w, NULL, 0);                         /* includes NUL */
+    if (need <= 0) return o_GetCurrentDirectoryA(cap, buf);
+    if (!buf || (DWORD)need > cap) return (DWORD)need;
+    w2a(w, buf, (int)cap);
+    return (DWORD)need - 1;
+}
+
 static BOOL (WINAPI *o_DeleteFileA)(LPCSTR);
 static BOOL WINAPI f_DeleteFileA(LPCSTR p)
 {
@@ -462,6 +528,8 @@ static FsHook g_fs[] = {
     { "KERNEL32.dll", "SetFileAttributesA", (void *)f_SetFileAttributesA, (void **)&o_SetFileAttributesA },
     { "KERNEL32.dll", "DeleteFileA",        (void *)f_DeleteFileA,        (void **)&o_DeleteFileA },
     { "KERNEL32.dll", "CreateDirectoryA",   (void *)f_CreateDirectoryA,   (void **)&o_CreateDirectoryA },
+    { "KERNEL32.dll", "CreateProcessA",     (void *)f_CreateProcessA,     (void **)&o_CreateProcessA },
+    { "KERNEL32.dll", "GetCurrentDirectoryA", (void *)f_GetCurrentDirectoryA, (void **)&o_GetCurrentDirectoryA },
     { "KERNEL32.dll", "RemoveDirectoryA",   (void *)f_RemoveDirectoryA,   (void **)&o_RemoveDirectoryA },
     { "KERNEL32.dll", "MoveFileA",          (void *)f_MoveFileA,          (void **)&o_MoveFileA },
     { "KERNEL32.dll", "MoveFileExA",        (void *)f_MoveFileExA,        (void **)&o_MoveFileExA },

@@ -326,9 +326,33 @@ static void ensure_sub(HWND h)
 }
 
 static DWORD g_ui_tid;
+BOOL Fs_TestCreateProcess(LPSTR cmd, LPPROCESS_INFORMATION pi);
+
+/* SLOT_SELFTEST=proc: run "cmd /c echo ok> <SLOT_SELFTEST_FILE>" through the CreateProcessA hook code, with the
+ * path (which may hold slot characters) in the ANSI command line, then look for the file by its real name */
+static void proc_selftest(void)
+{
+    WCHAR file[1024] = L"", cmdw[1200];
+    char cmda[2400];
+    PROCESS_INFORMATION pi;
+    GetEnvironmentVariableW(L"SLOT_SELFTEST_FILE", file, 1024);
+    DeleteFileW(file);
+    wsprintfW(cmdw, L"cmd.exe /c echo ok> \"%ls\"", file);
+    Slot_WideCharToMultiByte(CP_ACP, 0, cmdw, -1, cmda, sizeof cmda, NULL, NULL);
+    memset(&pi, 0, sizeof pi);
+    if (Fs_TestCreateProcess(cmda, &pi)) {
+        WaitForSingleObject(pi.hProcess, 8000);
+        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        Slot_Log("proc selftest: started, file %s", GetFileAttributesW(file) != INVALID_FILE_ATTRIBUTES ? "CREATED" : "MISSING");
+    } else Slot_Log("proc selftest: CreateProcess failed %lu", GetLastError());
+}
+
 static DWORD WINAPI SelfTestThread(LPVOID p)
 {
+    char m0[8] = "";
     (void)p;
+    GetEnvironmentVariableA("SLOT_SELFTEST", m0, sizeof m0);
+    if (!lstrcmpA(m0, "proc")) { Sleep(6000); proc_selftest(); return 0; }
     Sleep(14000);
     GUITHREADINFO gi; gi.cbSize = sizeof gi;
     if (GetGUIThreadInfo(g_ui_tid, &gi) && gi.hwndFocus) {
