@@ -283,7 +283,38 @@ static int equiv_partner(unsigned c)
     return -1;
 }
 
-/* the pattern field of the search dialog (the ComboBox or its inner Edit) while "regular expression" is on */
+/* The toolbar search box has no checkbox of its own: it follows the option of the search dialog.  Peggy keeps
+ * that option in the heap, so it is tracked here - read from the saved workspace at first use, then updated
+ * whenever the dialog shows or the option / a search button is used (Dlg_NoteFindDlg, called from ime.c). */
+#define FIND_TOOLBAR_COMBO 32792
+static volatile LONG g_regex = -1;
+
+/* Workspace\FindData0: "CqFI" 01 00, <len> <last pattern>, then the option bytes; the third one is "regular expression" */
+static int saved_regex(void)
+{
+    HKEY k;
+    BYTE d[512];
+    DWORD n = sizeof d, type = 0;
+    int r = 0;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Anchor\\Peggy\\Workspace", 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
+    if (RegQueryValueExW(k, L"FindData0", NULL, &type, d, &n) == ERROR_SUCCESS && type == REG_BINARY && n > 9 &&
+        d[0] == 'C' && d[1] == 'q' && d[2] == 'F' && d[3] == 'I') {
+        DWORD o = 6 + 1 + d[6];
+        if (o + 3 <= n) r = d[o + 2] != 0;
+    }
+    RegCloseKey(k);
+    return r;
+}
+
+void Dlg_NoteFindDlg(HWND h)
+{
+    char c[16];
+    if (h && GetClassNameA(h, c, sizeof c) && !lstrcmpA(c, "#32770") && GetDlgItem(h, FIND_DLG_REGEX))
+        InterlockedExchange(&g_regex, SendDlgItemMessageA(h, FIND_DLG_REGEX, BM_GETCHECK, 0, 0) == BST_CHECKED);
+}
+
+/* the pattern field of the search dialog or the toolbar search box (the ComboBox or its inner Edit) while
+ * "regular expression" is on */
 static int is_regex_find_pattern(HWND h)
 {
     char c[24];
@@ -293,7 +324,12 @@ static int is_regex_find_pattern(HWND h)
         cb = GetParent(h);
         if (!cb || !GetClassNameA(cb, c, sizeof c)) return 0;
     }
-    if (lstrcmpiA(c, "ComboBox") || GetDlgCtrlID(cb) != FIND_DLG_COMBO) return 0;
+    if (lstrcmpiA(c, "ComboBox")) return 0;
+    if (GetDlgCtrlID(cb) == FIND_TOOLBAR_COMBO) {
+        if (g_regex < 0) InterlockedCompareExchange(&g_regex, saved_regex(), -1);
+        return g_regex > 0;
+    }
+    if (GetDlgCtrlID(cb) != FIND_DLG_COMBO) return 0;
     dlg = GetParent(cb);
     if (!dlg || !GetClassNameA(dlg, c, sizeof c) || lstrcmpA(c, "#32770")) return 0;
     return SendDlgItemMessageA(dlg, FIND_DLG_REGEX, BM_GETCHECK, 0, 0) == BST_CHECKED;

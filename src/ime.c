@@ -19,6 +19,7 @@
 #define MAXSUB 256
 static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
+void Dlg_NoteFindDlg(HWND h);
 int Dlg_TestGetWindowText(HWND h, char *buf, int cap);
 LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static void log_menu_tree(HMENU m, int depth);
@@ -476,6 +477,13 @@ static DWORD WINAPI CtrlFDriver(LPVOID p)
     return 0;
 }
 
+static BOOL CALLBACK TbComboProc(HWND h, LPARAM l)
+{
+    char c[16];
+    if (GetDlgCtrlID(h) == 32792 && GetClassNameA(h, c, sizeof c) && !lstrcmpiA(c, "ComboBox")) { *(HWND *)l = h; return FALSE; }
+    return TRUE;
+}
+
 static BOOL CALLBACK FindDlgProc(HWND h, LPARAM l)
 {
     char c[16];
@@ -515,8 +523,34 @@ static DWORD WINAPI FindDriver(LPVOID p)
     if (GetEnvironmentVariableA("SLOT_FIND_REGEX", rxv, sizeof rxv)) {      /* "regular expression" (id 3007): 1 = on, 0 = off */
         HWND rx = GetDlgItem(dlg, 3007);
         int want = rxv[0] != '0';
+        if (rxv[0] == '?') want = rx ? SendMessageW(rx, BM_GETCHECK, 0, 0) == BST_CHECKED : 0;      /* only report */
         if (rx && (SendMessageW(rx, BM_GETCHECK, 0, 0) == BST_CHECKED) != want) SendMessageW(rx, BM_CLICK, 0, 0);
         Slot_Log("finddriver: regex checked=%d", rx ? (int)SendMessageW(rx, BM_GETCHECK, 0, 0) : -1);
+    }
+    char tbtext[64] = "";
+    if (GetEnvironmentVariableA("SLOT_TB_TEXT", tbtext, sizeof tbtext)) {   /* toolbar search box: does it honour the dialog's options? */
+        HWND owner = GetWindow(dlg, GW_OWNER), nxt = NULL, tb = NULL;
+        EnumChildWindows(dlg, FindNextBtnProc, (LPARAM)&nxt);
+        SendMessageA(edit, WM_SETTEXT, 0, (LPARAM)"a");                 /* present at column 1: commits the options without a not-found box */
+        if (nxt) SendMessageW(nxt, BM_CLICK, 0, 0);
+        Sleep(500);
+        SendMessageW(GetDlgItem(dlg, 1), BM_CLICK, 0, 0);               /* 閉じる */
+        Sleep(800);
+        if (owner) log_statusbar(owner);
+        EnumChildWindows(owner, TbComboProc, (LPARAM)&tb);
+        Slot_Log("finddriver: toolbar combo=%p", tb);
+        if (tb) {
+            HWND te0 = FindWindowExA(tb, NULL, "Edit", NULL);
+            if (!lstrcmpA(tbtext, "@tilde") && te0) { WCHAR tw[3] = { L'b', (WCHAR)0xFF5E, 0 }; SetWindowTextW(te0, tw); }            /* b + FULLWIDTH TILDE */
+            else SendMessageA(tb, WM_SETTEXT, 0, (LPARAM)tbtext);
+            HWND te = FindWindowExA(tb, NULL, "Edit", NULL);
+            PostMessageA(te ? te : tb, WM_KEYDOWN, VK_RETURN, 0x001C0001);       /* Enter in the toolbar box runs the search */
+            PostMessageA(te ? te : tb, WM_KEYUP, VK_RETURN, 0xC01C0001);
+            Sleep(1200);
+            Slot_Log("finddriver: after toolbar search:");
+            log_statusbar(owner);
+        }
+        return 0;
     }
     static const WCHAR t[] = { 0x301C, 0 };            /* WAVE DASH, not representable in CP932 */
     if (OpenClipboard(dlg)) {
@@ -603,6 +637,9 @@ static LRESULT CALLBACK CallWndHook(int code, WPARAM wp, LPARAM lp)
         const CWPSTRUCT *c = (const CWPSTRUCT *)lp;
         if (c->message == WM_SETFOCUS || c->message == WM_IME_SETCONTEXT || c->message == WM_IME_STARTCOMPOSITION)
             ensure_sub(c->hwnd);
+        if (c->message == WM_SHOWWINDOW && c->wParam) Dlg_NoteFindDlg(c->hwnd);
+        else if (c->message == WM_COMMAND && (LOWORD(c->wParam) == 3007 || LOWORD(c->wParam) == 3004 || LOWORD(c->wParam) == 3001))
+            Dlg_NoteFindDlg(c->hwnd);
         if (Slot_LogOn()) trace_wnd_msg(c);
         if (c->message == WM_ACTIVATEAPP) { if (c->wParam) ll_on(); else ll_off(); }
     }
