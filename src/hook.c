@@ -320,6 +320,15 @@ int Hook_Iat(HMODULE mod, const char *dll, const char *name, void *repl, void **
 
 void Fs_Install(HMODULE exe);
 void Dlg_Install(HMODULE exe);
+void Pg_Install(HMODULE exe);
+void Pg_InstallPeggy(HMODULE exe);
+
+static int is_pgrep(void)
+{
+    char p[MAX_PATH];
+    int n = (int)GetModuleFileNameA(NULL, p, MAX_PATH);
+    return n >= 9 && lstrcmpiA(p + n - 9, "pgrep.exe") == 0;
+}
 
 __declspec(dllexport) void DllInit(void) {}
 
@@ -334,6 +343,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
         /* debug aid: SLOT_MASK=<bitmask> selects which hooks are installed */
         char mb[16];
         unsigned long mask = GetEnvironmentVariableA("SLOT_MASK", mb, sizeof mb) ? strtoul(mb, NULL, 0) : ~0ul;
+        if (is_pgrep()) {                                   /* the bundled grep tool: conversions and file names only */
+            for (size_t i = 0; i < sizeof g_hooks / sizeof g_hooks[0]; i++)
+                if (!strcmp(g_hooks[i].name, "MultiByteToWideChar") || !strcmp(g_hooks[i].name, "WideCharToMultiByte"))
+                    hook_one(exe, &g_hooks[i]);
+            Fs_Install(exe);
+            Pg_Install(exe);
+            return TRUE;
+        }
         for (size_t i = 0; i < sizeof g_hooks / sizeof g_hooks[0]; i++)
             if (mask & (1ul << i)) hook_one(exe, &g_hooks[i]);
         /* MFC42.DLL converts Unicode <-> ANSI itself (CString, window text of Unicode controls) */
@@ -344,6 +361,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
                                             !strcmp(g_hooks[i].name, "WideCharToMultiByte")))
                     Slot_Log("mfc42 %s: %d", g_hooks[i].name, hook_one(mfc, &g_hooks[i]));
         }
+        Pg_InstallPeggy(exe);
         if (mask & (1ul << 11)) Ime_Init(inst);
         if (mask & (1ul << 12)) Fs_Install(exe);
         if (mask & (1ul << 13)) Dlg_Install(exe);

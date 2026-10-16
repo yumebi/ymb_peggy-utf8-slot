@@ -3,8 +3,9 @@
 ;   検証用:  ISCC.exe /DTESTBUILD peggy_utf8.iss -> 管理者権限なし・別名で出力 (本体には使わない)
 
 #define AppName "Peggy Pro 4.63 UTF-8 パッチ"
-#define AppVer  "1.2.0"
+#define AppVer  "1.3.0"
 #define ExeSize 2383872
+#define PgrepSize 65536
 
 [Setup]
 AppId={{B6F1C1A2-7C0E-4E55-9B1B-5A1D0A8E6B01}
@@ -40,10 +41,13 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 ; peggypro.exe は元の exe をバックアップしてから置き換える。アンインストール時は Code 側でバックアップから復元する。
 Source: "..\dist\peggypro.exe"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall; BeforeInstall: BackupOriginalExe
 Source: "..\dist\utf8slot.dll"; DestDir: "{app}"; Flags: ignoreversion
+; pgrep.exe ("ファイルから検索" の実体) も同様。元のサイズと違う版は置き換えない。
+Source: "..\dist\pgrep.exe"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall; BeforeInstall: BackupOriginalPgrep; Check: PgrepIsOriginal
 
 [Code]
 const
   ExpectedExeSize = {#ExeSize};
+  ExpectedPgrepSize = {#PgrepSize};
 
 function BackupPath: String;
 begin
@@ -57,6 +61,29 @@ begin
   Exe := ExpandConstant('{app}\peggypro.exe');
   if FileExists(Exe) and (not FileExists(BackupPath)) then
     FileCopy(Exe, BackupPath, False);
+end;
+
+{ pgrep.exe: 元のサイズ、またはパッチ済み(バックアップがある)のときだけ置き換える }
+function PgrepIsOriginal: Boolean;
+var
+  P: String;
+  Sz: Integer;
+begin
+  P := ExpandConstant('{app}\pgrep.exe');
+  Result := False;
+  if FileExists(P + '.pre-utf8slot') then
+    Result := True
+  else if FileExists(P) and FileSize(P, Sz) then
+    Result := (Sz = ExpectedPgrepSize);
+end;
+
+procedure BackupOriginalPgrep;
+var
+  P: String;
+begin
+  P := ExpandConstant('{app}\pgrep.exe');
+  if FileExists(P) and (not FileExists(P + '.pre-utf8slot')) then
+    FileCopy(P, P + '.pre-utf8slot', False);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -87,6 +114,12 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
+    Exe := ExpandConstant('{app}\pgrep.exe');
+    Bak := Exe + '.pre-utf8slot';
+    if FileExists(Bak) then
+    begin
+      if FileCopy(Bak, Exe, False) then DeleteFile(Bak);
+    end;
     Exe := ExpandConstant('{app}\peggypro.exe');
     Bak := Exe + '.pre-utf8slot';
     if FileExists(Bak) then

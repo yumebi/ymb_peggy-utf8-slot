@@ -140,6 +140,59 @@ static void assign(uint32_t cp, int s)                   /* bind cp to slot s (i
     hash_insert(cp, s);
 }
 
+static uint32_t g_persist_off;                           /* bytes of the file already applied */
+
+/* apply records; `merge`: records of other processes arriving later - never take a slot this process has used */
+static void apply_records(const uint8_t *buf, uint32_t records, int merge)
+{
+    for (uint32_t i = 0; i < records; i++) {
+        uint32_t cp; uint16_t pair, tag;
+        memcpy(&cp, buf + i * 8, 4); memcpy(&pair, buf + i * 8 + 4, 2); memcpy(&tag, buf + i * 8 + 6, 2);
+        if (tag != PERSIST_TAG || cp < 0x80 || cp > 0x10FFFF) continue;
+        int s = slot_of_pair(pair);
+        if (s < 0) continue;
+        if (merge && (g_touched[s] && g_slot_cp[s] != cp)) continue;
+        int old = hash_find(cp);
+        if (old == s) continue;
+        if (old >= 0) {
+            if (merge && g_touched[old]) continue;
+            hash_remove(cp, old); g_slot_cp[old] = 0; g_nused--;
+        }
+        assign(cp, s);
+    }
+}
+
+/* read what other processes appended since the last look (caller holds g_cs, or runs single-threaded) */
+static void reload_tail(int merge)
+{
+    if (!g_persist) return;
+    HANDLE f = CreateFileW(g_persist_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(f, NULL);
+    if (size == INVALID_FILE_SIZE || size < g_persist_off) { g_persist_off = 0; }          /* rewritten by a compaction */
+    if (size > g_persist_off && size - g_persist_off < (16u << 20)) {
+        DWORD want = (size - g_persist_off) / 8 * 8, got = 0;
+        uint8_t *buf = want ? (uint8_t *)HeapAlloc(GetProcessHeap(), 0, want) : NULL;
+        if (buf) {
+            SetFilePointer(f, (LONG)g_persist_off, NULL, FILE_BEGIN);
+            ReadFile(f, buf, want, &got, NULL);
+            apply_records(buf, got / 8, merge);
+            g_persist_off += got / 8 * 8;
+            HeapFree(GetProcessHeap(), 0, buf);
+        }
+    }
+    CloseHandle(f);
+}
+
+void Slot_ReloadPersisted(void)                          /* another process (pgrep) may have assigned slots */
+{
+    if (!g_persist) return;
+    EnterCriticalSection(&g_cs);
+    reload_tail(1);
+    LeaveCriticalSection(&g_cs);
+}
+
 void Slot_LoadPersisted(void)
 {
     char off[8];
@@ -156,40 +209,23 @@ void Slot_LoadPersisted(void)
         lstrcatW(g_persist_path, L"\\slots.dat");
     }
     g_persist = 1;
-    HANDLE f = CreateFileW(g_persist_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) return;
-    DWORD size = GetFileSize(f, NULL), got = 0;
-    uint8_t *buf = (size && size < (16u << 20)) ? (uint8_t *)HeapAlloc(GetProcessHeap(), 0, size) : NULL;
-    if (buf) ReadFile(f, buf, size, &got, NULL);
-    CloseHandle(f);
-    if (!buf) return;
-    uint32_t records = got / 8;
-    for (uint32_t i = 0; i < records; i++) {
-        uint32_t cp; uint16_t pair, tag;
-        memcpy(&cp, buf + i * 8, 4); memcpy(&pair, buf + i * 8 + 4, 2); memcpy(&tag, buf + i * 8 + 6, 2);
-        if (tag != PERSIST_TAG || cp < 0x80 || cp > 0x10FFFF) continue;
-        int s = slot_of_pair(pair);
-        if (s < 0) continue;
-        int old = hash_find(cp);
-        if (old >= 0 && old != s) { hash_remove(cp, old); g_slot_cp[old] = 0; g_nused--; }
-        assign(cp, s);
-    }
-    HeapFree(GetProcessHeap(), 0, buf);
+    reload_tail(0);
     /* compact when most of the file is superseded records */
-    if (records > (uint32_t)(g_nused * 2 + 256)) {
+    if (g_persist_off > (uint32_t)(g_nused * 2 + 256) * 8) {
         WCHAR tmp[MAX_PATH];
         lstrcpyW(tmp, g_persist_path); lstrcatW(tmp, L".tmp");
         HANDLE o = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (o != INVALID_HANDLE_VALUE) {
+            uint32_t written = 0;
             for (int s2 = 0; s2 < g_nslot; s2++) {
                 if (!g_slot_cp[s2]) continue;
                 uint8_t rec[8]; uint32_t cp2 = g_slot_cp[s2]; uint16_t pr = g_slot_pair[s2]; DWORD w;
                 memcpy(rec, &cp2, 4); memcpy(rec + 4, &pr, 2); rec[6] = PERSIST_TAG & 0xFF; rec[7] = PERSIST_TAG >> 8;
                 WriteFile(o, rec, sizeof rec, &w, NULL);
+                written += 8;
             }
             CloseHandle(o);
-            MoveFileExW(tmp, g_persist_path, MOVEFILE_REPLACE_EXISTING);
+            if (MoveFileExW(tmp, g_persist_path, MOVEFILE_REPLACE_EXISTING)) g_persist_off = written;
         }
     }
 }
@@ -198,6 +234,10 @@ static int slot_for(uint32_t cp)
 {
     EnterCriticalSection(&g_cs);
     int s = hash_find(cp);
+    if (s < 0) {
+        reload_tail(1);                                   /* pick up slots other processes (pgrep) assigned meanwhile */
+        s = hash_find(cp);
+    }
     if (s < 0) {
         while (g_alloc_ptr < g_nslot && g_slot_cp[g_alloc_ptr]) g_alloc_ptr++;
         if (g_alloc_ptr < g_nslot) s = g_alloc_ptr;

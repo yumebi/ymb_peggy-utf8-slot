@@ -30,6 +30,10 @@ void Slot_Log(const char *fmt, ...);
 FILE *(__cdecl *o_fopen)(const char *, const char *);
 int (__cdecl *o_fclose)(FILE *);
 
+/* pgrep.exe: every file it opens for reading goes through the 4-byte fix-up (not only Peggy's document loader) */
+int g_io_all_reads;
+DWORD g_io_read_cap = 0x30000000;
+
 static uint8_t *read_file(const char *path, DWORD *len)
 {
     WCHAR sp[1024];
@@ -40,7 +44,7 @@ static uint8_t *read_file(const char *path, DWORD *len)
     if (h == INVALID_HANDLE_VALUE) return NULL;
     DWORD n = GetFileSize(h, NULL), got = 0;
     uint8_t *b = NULL;
-    if (n != INVALID_FILE_SIZE && n > 0 && n < 0x30000000 && (b = (uint8_t *)malloc(n))) {
+    if (n != INVALID_FILE_SIZE && n > 0 && n < g_io_read_cap && (b = (uint8_t *)malloc(n))) {
         if (!ReadFile(h, b, n, &got, NULL) || got != n) { free(b); b = NULL; }
     }
     CloseHandle(h);
@@ -174,7 +178,7 @@ __attribute__((noinline)) FILE *__cdecl Io_fopen(const char *path, const char *m
     uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
     int rd = strchr(mode, 'r') != NULL && strchr(mode, '+') == NULL;
     int wr = strchr(mode, 'w') != NULL;
-    if (rd && ra >= base + LOAD_RVA_LO && ra < base + LOAD_RVA_HI) {
+    if (rd && (g_io_all_reads || (ra >= base + LOAD_RVA_LO && ra < base + LOAD_RVA_HI))) {
         f = convert_for_load(f, path);
     } else if (wr) {
         for (int i = 0; i < MAXW; i++)
@@ -202,3 +206,6 @@ int __cdecl Io_fclose(FILE *f)
     if (fix && r == 0) fix_saved(path);
     return r;
 }
+
+void *Io_fopen_addr(void) { return (void *)Io_fopen; }
+void *Io_fclose_addr(void) { return (void *)Io_fclose; }

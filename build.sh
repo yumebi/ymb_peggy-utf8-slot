@@ -5,6 +5,8 @@
 #           CC=/path/to/i686-w64-mingw32-clang ./build.sh original.exe
 #
 # The original exe must be the unmodified 4.63 build (2,383,872 bytes).
+# pgrep.exe (the grep tool behind "Search in files") is patched too, from the file next to the exe
+# or from the path in $2 (unmodified, 65,536 bytes).
 set -e
 cd "$(dirname "$0")"
 
@@ -19,12 +21,19 @@ fi
 mkdir -p build dist
 
 $CC -O2 -Wall -shared -static -Wl,--kill-at -o build/utf8slot.dll \
-    src/hook.c src/slot.c src/io.c src/ime.c src/fs.c src/dlg.c \
+    src/hook.c src/slot.c src/io.c src/ime.c src/fs.c src/dlg.c src/pgrep.c \
     -luser32 -lgdi32 -limm32 -lshell32 -ladvapi32 -lcomdlg32
 $CC -O2 -Wall -o build/test.exe src/test.c src/slot.c -static -luser32
 ./build/test.exe
 
 python tools/patch_import.py "$ORIG" build/peggypro.exe utf8slot.dll
+PGREP="${2:-$(dirname "$ORIG")/pgrep.exe}"
+if [ -f "$PGREP" ]; then
+    python tools/patch_import.py "$PGREP" build/pgrep.exe utf8slot.dll
+    cp build/pgrep.exe dist/
+else
+    echo "warning: pgrep.exe not found ($PGREP); \"Search in files\" will not handle non-CP932 characters" >&2
+fi
 
 cp build/peggypro.exe build/utf8slot.dll dist/
 echo "OK: dist/peggypro.exe + dist/utf8slot.dll"

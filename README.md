@@ -23,9 +23,10 @@ Peggy は内部が CP932(Shift_JIS)固定のため、CP932 に無い文字(絵�
 | 入力 | IME の変換結果、絵文字パネル等の Unicode 入力、Unicode クリップボードの貼り付け・コピー。検索窓などの標準 Edit コントロールへの貼り付けも、文書内と同じバイト列で入る(`〜` U+301C が `～` U+FF5E に化けず検索にヒットする) |
 | ファイル名 | CP932 外の文字を含むファイル名で、開く・保存・「開く」「保存」ダイアログ・最近使ったファイルの履歴・ドラッグ&ドロップ・コマンドライン・タイトル/タブ表示 |
 | 同一視検索 | 「文字列の検索」で「正規表現」をオンにすると、`〜`(U+301C)と`～`(U+FF5E)など、CP932 と Unicode で食い違う見た目が同じ文字(`〜～` `‖∥` `−－` `¢￠` `£￡` `¬￢` `—―` `¦￤`)を、パターンに `[〜～]` の形で自動展開して両方にヒットさせる(正規表現オフでは働かない)。ツールバーの検索窓も、検索ダイアログの「正規表現」の設定に従って同様に展開する |
-| 表示 | ウィンドウタイトルは `Peggy Pro (UTF-8 Slot) - [...]`、バージョン情報は `Peggy Pro Version 4.63 (...) + UTF-8 Slot 1.2`。パッチ版だと分かる |
+| 表示 | ウィンドウタイトルは `Peggy Pro (UTF-8 Slot) - [...]`、バージョン情報は `Peggy Pro Version 4.63 (...) + UTF-8 Slot 1.3`。パッチ版だと分かる |
 | 保存データの継続性 | スロット割り当ては `%APPDATA%\PeggyUtf8Slot\slots.dat` に保存され、次の起動でも同じ文字が同じスロットになる。Peggy が ANSI で書き出す検索履歴・プロジェクトファイルなどが、起動をまたいでも同じ文字として読める。表が満杯になったら、そのセッションで使っていないスロットを再利用する |
 | 二重起動の転送 | 起動中の Peggy へ後から渡したファイル(`peggypro.exe ファイル名`)でも、CP932 外の文字を含む名前が正しく開く(スロット番号が起動ごとに違う問題を、本来の UTF-16 を添えて解決) |
+| ファイルから検索 | 同梱の `pgrep.exe`(検索の実体)にも同じ DLL を読み込ませる。CP932 外の文字を含む UTF-8 / UTF-16 のファイルの本文(4 バイトの絵文字も)と、そうした文字を含むファイル名が、検索・結果表示とも正しく扱える。スロットは `slots.dat` 経由で Peggy と共有し、`pgrep.exe` が割り当てた分は結果を読む前に Peggy が取り込む |
 | 互換 | 内部バッファは CP932 のまま。桁計算・速度・操作感は変わらない |
 
 ## 仕組み(スロット方式)
@@ -39,8 +40,9 @@ CP932 に無い文字を、CP932 の未定義 2 バイト領域(約 3556 個の�
 | `src/io.c` | 4 バイト UTF-8 の読み書き修復(読み込み時に CESU-8 化した一時ファイル、保存後に 4 バイトへ復元) |
 | `src/fs.c` | Unicode ファイル名。スロット文字を含むパスだけ W 版 API (`CreateFileW`・`CreateProcessW` など) に切り替え、列挙結果・コマンドラインはスロット化して返す |
 | `src/dlg.c` | Unicode コントロール(「文字列の検索」ダイアログなど)の ANSI での読み書き(`GetWindowTextA` / `SendMessageA` を W + スロット変換にする。ANSI の ComboBox は内側の Unicode の Edit を直接読む)。ファイルダイアログ(`GetOpenFileNameA` を W 版へ変換、`CDM_*` メッセージも変換)とレジストリ(REG_SZ を UTF-16 で保存)。MFC42 が遅延読み込みする API は `GetProcAddress` の横取りで差し替える |
+| `src/pgrep.c` | `pgrep.exe` 側の組み込み(`fopen` の差し替え)と、Peggy 側でパイプを読む前のスロット取り込み |
 | `src/ime.c` | IME 確定文字列(`WM_IME_COMPOSITION`)と Unicode パケット(`VK_PACKET`)の直接入力 |
-| `tools/patch_import.py` | exe に `utf8slot.dll!DllInit` のインポートを追加(セクション追加なし) |
+| `tools/patch_import.py` | exe に `utf8slot.dll!DllInit` のインポートを追加(セクション追加なし)。`peggypro.exe` と `pgrep.exe` の両方に使う |
 | `installer/peggy_utf8.iss` | Inno Setup 6 用インストーラー(元 exe のバックアップと、アンインストール時の復元つき) |
 | `analysis/` | 解析に使った Ghidra スクリプト(結果の逆アセンブル出力は含めない) |
 
@@ -56,12 +58,12 @@ CP932 に無い文字を、CP932 の未定義 2 バイト領域(約 3556 個の�
 
 ```bash
 pip install pefile
-./build.sh "/c/Program Files (x86)/Anchor/Peggy/peggypro.exe.bak"   # 無改造の 4.63 exe を指定
+./build.sh "/c/Program Files (x86)/Anchor/Peggy/peggypro.exe.bak"   # 無改造の 4.63 exe を指定(同じ場所の無改造の pgrep.exe も自動で使う。別の場所なら第 2 引数)
 # 任意: インストーラー  ->  dist/PeggyUtf8Setup.exe
 ISCC.exe installer/peggy_utf8.iss
 ```
 
-`dist/peggypro.exe` と `dist/utf8slot.dll` を Peggy のインストール先へ置く(元の exe は事前にバックアップすること)。
+`dist/peggypro.exe`・`dist/pgrep.exe`・`dist/utf8slot.dll` を Peggy のインストール先へ置く(元の exe は事前にバックアップすること)。
 
 ## 既知の制限
 - 1 セッションで扱える CP932 外の異なる文字は約 3556 種(うち、キー・IME で直接入力できるのは約 1880 種)。過去のセッションの割り当ては、満杯のときだけ再利用される

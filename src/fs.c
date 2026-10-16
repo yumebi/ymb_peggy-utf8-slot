@@ -120,6 +120,7 @@ static BOOL WINAPI f_CreateProcessA(LPCSTR app, LPSTR cmd, LPSECURITY_ATTRIBUTES
     WCHAR *wa, *wc, *wd, *wdesk = NULL, *wtitle = NULL;
     STARTUPINFOW sw;
     BOOL r;
+    Slot_Log("CreateProcessA app=%s cmd=%s dir=%s inherit=%d flags=%lx", app ? app : "(null)", cmd ? cmd : "(null)", dir ? dir : "(null)", inh, fl);
     if (!has_slot_z(app) && !has_slot_z(cmd) && !has_slot_z(dir) && !(si && (has_slot_z(si->lpDesktop) || has_slot_z(si->lpTitle))))
         return o_CreateProcessA(app, cmd, pa, ta, inh, fl, env, dir, si, pi);
     log_path("CreateProcessA", cmd ? cmd : app);
@@ -191,7 +192,7 @@ static BOOL WINAPI f_PostMessageA(HWND h, UINT m, WPARAM w, LPARAM l)
         BYTE *v = (BYTE *)MapViewOfFile(g_dbl_map, FILE_MAP_WRITE, 0, 0, 0);
         if (v) {
             const char *a = (const char *)v;
-            if (lstrlenA(a) < DBL_OFF - 4 && has_slot_z(a)) {
+            if (memchr(a, 0, DBL_OFF - 4) && has_slot_z(a)) {                /* terminated inside the ANSI area */
                 WCHAR *wide = wdup_all(a);
                 if (wide && (lstrlenW(wide) + 1) * 2 + 8 < 16384 - DBL_OFF) {
                     memcpy(v + DBL_OFF + 8, wide, (lstrlenW(wide) + 1) * sizeof(WCHAR));
@@ -210,12 +211,19 @@ void Fs_FixDoubleStart(void)                          /* receiver side: called f
 {
     HANDLE map = OpenFileMappingA(FILE_MAP_WRITE, FALSE, "PeggyDoubleStart");
     BYTE *v = map ? (BYTE *)MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, 0) : NULL;
-    if (v && !memcmp(v + DBL_OFF, "U8SL", 4)) {
+    MEMORY_BASIC_INFORMATION mbi;
+    /* any local process can write this mapping: stay inside the mapped size and insist on a terminator */
+    if (v && VirtualQuery(v, &mbi, sizeof mbi) && mbi.RegionSize >= DBL_OFF + 16 && !memcmp(v + DBL_OFF, "U8SL", 4)) {
         const WCHAR *wide = (const WCHAR *)(v + DBL_OFF + 8);
-        int need = Slot_WideCharToMultiByte(CP_ACP, 0, wide, -1, NULL, 0, NULL, NULL);
-        if (need > 0 && need < DBL_OFF) {
-            Slot_WideCharToMultiByte(CP_ACP, 0, wide, -1, (char *)v, need, NULL, NULL);
-            Slot_Log("double start: command line rewritten with this process's slots (%d bytes)", need - 1);
+        SIZE_T region = mbi.RegionSize < 16384 ? mbi.RegionSize : 16384;
+        SIZE_T maxw = (region - (DBL_OFF + 8)) / sizeof(WCHAR), len = 0;
+        while (len < maxw && wide[len]) len++;
+        if (len < maxw) {                                  /* terminated inside the mapping */
+            int need = Slot_WideCharToMultiByte(CP_ACP, 0, wide, -1, NULL, 0, NULL, NULL);
+            if (need > 0 && need < DBL_OFF) {
+                Slot_WideCharToMultiByte(CP_ACP, 0, wide, -1, (char *)v, need, NULL, NULL);
+                Slot_Log("double start: command line rewritten with this process's slots (%d bytes)", need - 1);
+            }
         }
         memset(v + DBL_OFF, 0, 8);
     }
