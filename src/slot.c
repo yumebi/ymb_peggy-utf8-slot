@@ -10,6 +10,8 @@ static int       g_acp932;
 static uint16_t  g_slot_pair[MAXSLOT];     /* slot index -> (lead<<8|trail) */
 static uint32_t  g_slot_cp[MAXSLOT];       /* slot index -> code point (0 = unassigned) */
 static int       g_nslot, g_nused, g_has_supp;
+static uint8_t   g_touched[MAXSLOT];       /* slot seen (assigned or decoded) in this session: not evictable */
+static int       g_alloc_ptr, g_evict_ptr;
 static int16_t   g_pair2slot[65536];       /* pair -> slot index, -1 = not a slot */
 static uint8_t   g_lead_has_slot[256];
 static uint32_t  g_cache[0x10000];         /* BMP code point -> ansi bytes cache */
@@ -81,9 +83,114 @@ static int hash_find(uint32_t cp)
     uint32_t h = (cp * 2654435761u) & (HASHN - 1);
     for (;;) {
         int32_t s = g_hash[h];
-        if (s < 0) return -1;
-        if (g_slot_cp[s] == cp) return s;
+        if (s == -1) return -1;
+        if (s >= 0 && g_slot_cp[s] == cp) return s;      /* -2: a deleted entry, keep probing */
         h = (h + 1) & (HASHN - 1);
+    }
+}
+
+static void hash_insert(uint32_t cp, int slot)
+{
+    uint32_t h = (cp * 2654435761u) & (HASHN - 1);
+    while (g_hash[h] >= 0) h = (h + 1) & (HASHN - 1);
+    g_hash[h] = slot;
+}
+
+static void hash_remove(uint32_t cp, int slot)
+{
+    uint32_t h = (cp * 2654435761u) & (HASHN - 1);
+    for (;;) {
+        int32_t s = g_hash[h];
+        if (s == -1) return;
+        if (s == slot) { g_hash[h] = -2; return; }
+        h = (h + 1) & (HASHN - 1);
+    }
+}
+
+/* ---- persistence: the same character keeps its slot pair from one session to the next, so ANSI text that
+ * Peggy stores (project files, search history, macros...) still means the same thing when read back --------
+ * File: records of 8 bytes (code point, slot pair, tag), appended on every assignment; the last record for a
+ * slot / code point wins. */
+#define PERSIST_TAG 0x5A5Au
+static int  g_persist;
+static WCHAR g_persist_path[MAX_PATH];
+
+static void persist_append(uint32_t cp, uint16_t pair)
+{
+    if (!g_persist) return;
+    HANDLE f = CreateFileW(g_persist_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    uint8_t rec[8];
+    memcpy(rec, &cp, 4); memcpy(rec + 4, &pair, 2);
+    rec[6] = PERSIST_TAG & 0xFF; rec[7] = PERSIST_TAG >> 8;
+    DWORD w;
+    WriteFile(f, rec, sizeof rec, &w, NULL);
+    CloseHandle(f);
+}
+
+static int slot_of_pair(uint16_t pair) { return g_pair2slot[pair]; }
+
+static void assign(uint32_t cp, int s)                   /* bind cp to slot s (in memory only) */
+{
+    if (g_slot_cp[s]) hash_remove(g_slot_cp[s], s);
+    else g_nused++;
+    g_slot_cp[s] = cp;
+    if (cp >= 0x10000) g_has_supp = 1;
+    hash_insert(cp, s);
+}
+
+void Slot_LoadPersisted(void)
+{
+    char off[8];
+    WCHAR dir[MAX_PATH];
+    if (!g_acp932 || g_persist) return;
+    if (GetEnvironmentVariableA("SLOT_PERSIST", off, sizeof off) && off[0] == '0') return;
+    if (GetEnvironmentVariableW(L"SLOT_PERSIST_FILE", g_persist_path, MAX_PATH)) {
+        /* test override */
+    } else {
+        if (!GetEnvironmentVariableW(L"APPDATA", dir, MAX_PATH)) return;
+        lstrcatW(dir, L"\\PeggyUtf8Slot");
+        CreateDirectoryW(dir, NULL);
+        lstrcpyW(g_persist_path, dir);
+        lstrcatW(g_persist_path, L"\\slots.dat");
+    }
+    g_persist = 1;
+    HANDLE f = CreateFileW(g_persist_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(f, NULL), got = 0;
+    uint8_t *buf = (size && size < (16u << 20)) ? (uint8_t *)HeapAlloc(GetProcessHeap(), 0, size) : NULL;
+    if (buf) ReadFile(f, buf, size, &got, NULL);
+    CloseHandle(f);
+    if (!buf) return;
+    uint32_t records = got / 8;
+    for (uint32_t i = 0; i < records; i++) {
+        uint32_t cp; uint16_t pair, tag;
+        memcpy(&cp, buf + i * 8, 4); memcpy(&pair, buf + i * 8 + 4, 2); memcpy(&tag, buf + i * 8 + 6, 2);
+        if (tag != PERSIST_TAG || cp < 0x80 || cp > 0x10FFFF) continue;
+        int s = slot_of_pair(pair);
+        if (s < 0) continue;
+        int old = hash_find(cp);
+        if (old >= 0 && old != s) { hash_remove(cp, old); g_slot_cp[old] = 0; g_nused--; }
+        assign(cp, s);
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    /* compact when most of the file is superseded records */
+    if (records > (uint32_t)(g_nused * 2 + 256)) {
+        WCHAR tmp[MAX_PATH];
+        lstrcpyW(tmp, g_persist_path); lstrcatW(tmp, L".tmp");
+        HANDLE o = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (o != INVALID_HANDLE_VALUE) {
+            for (int s2 = 0; s2 < g_nslot; s2++) {
+                if (!g_slot_cp[s2]) continue;
+                uint8_t rec[8]; uint32_t cp2 = g_slot_cp[s2]; uint16_t pr = g_slot_pair[s2]; DWORD w;
+                memcpy(rec, &cp2, 4); memcpy(rec + 4, &pr, 2); rec[6] = PERSIST_TAG & 0xFF; rec[7] = PERSIST_TAG >> 8;
+                WriteFile(o, rec, sizeof rec, &w, NULL);
+            }
+            CloseHandle(o);
+            MoveFileExW(tmp, g_persist_path, MOVEFILE_REPLACE_EXISTING);
+        }
     }
 }
 
@@ -91,14 +198,19 @@ static int slot_for(uint32_t cp)
 {
     EnterCriticalSection(&g_cs);
     int s = hash_find(cp);
-    if (s < 0 && g_nused < g_nslot) {
-        s = g_nused++;
-        g_slot_cp[s] = cp;
-        if (cp >= 0x10000) g_has_supp = 1;
-        uint32_t h = (cp * 2654435761u) & (HASHN - 1);
-        while (g_hash[h] >= 0) h = (h + 1) & (HASHN - 1);
-        g_hash[h] = s;
+    if (s < 0) {
+        while (g_alloc_ptr < g_nslot && g_slot_cp[g_alloc_ptr]) g_alloc_ptr++;
+        if (g_alloc_ptr < g_nslot) s = g_alloc_ptr;
+        else {                                            /* full: reuse a slot nothing in this session has used */
+            while (g_evict_ptr < g_nslot && g_touched[g_evict_ptr]) g_evict_ptr++;
+            if (g_evict_ptr < g_nslot) s = g_evict_ptr;
+        }
+        if (s >= 0) {
+            assign(cp, s);
+            persist_append(cp, g_slot_pair[s]);
+        }
     }
+    if (s >= 0) g_touched[s] = 1;
     LeaveCriticalSection(&g_cs);
     return s;
 }
@@ -169,7 +281,7 @@ int WINAPI Slot_MultiByteToWideChar(UINT cp, DWORD fl, LPCCH src, int cb, LPWSTR
         while (j < cb) {
             if (g_lead_has_slot[s[j]] && j + 1 < cb) {
                 int sl = g_pair2slot[(s[j] << 8) | s[j + 1]];
-                if (sl >= 0 && g_slot_cp[sl]) { hit = sl; break; }
+                if (sl >= 0 && g_slot_cp[sl]) { hit = sl; g_touched[sl] = 1; break; }
             }
             j += (is_lead(s[j]) && j + 1 < cb) ? 2 : 1;
         }
@@ -202,6 +314,7 @@ int Slot_DecodeAt(const char *s, int n, unsigned *cp)
     if (!g_lead_has_slot[l]) return 0;
     int sl = g_pair2slot[(l << 8) | (uint8_t)s[1]];
     if (sl < 0 || !g_slot_cp[sl]) return 0;
+    g_touched[sl] = 1;
     *cp = g_slot_cp[sl];
     return 2;
 }

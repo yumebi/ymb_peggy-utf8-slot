@@ -329,6 +329,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res)
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
         Slot_Init();
+        Slot_LoadPersisted();
         HMODULE exe = GetModuleHandleA(NULL);
         /* debug aid: SLOT_MASK=<bitmask> selects which hooks are installed */
         char mb[16];

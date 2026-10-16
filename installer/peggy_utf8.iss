@@ -3,7 +3,7 @@
 ;   検証用:  ISCC.exe /DTESTBUILD peggy_utf8.iss -> 管理者権限なし・別名で出力 (本体には使わない)
 
 #define AppName "Peggy Pro 4.63 UTF-8 パッチ"
-#define AppVer  "1.1.0"
+#define AppVer  "1.2.0"
 #define ExeSize 2383872
 
 [Setup]

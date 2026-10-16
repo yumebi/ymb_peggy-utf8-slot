@@ -165,6 +165,64 @@ static DWORD WINAPI f_GetCurrentDirectoryA(DWORD cap, LPSTR buf)
     return (DWORD)need - 1;
 }
 
+/* ---- opening a file from a second launch (single-instance hand-over) ------------------------
+ * A second Peggy writes its command line (ANSI) into the shared memory "PeggyDoubleStart" and posts message
+ * 0x7400 to the running one.  Slot numbers are assigned per process, so the bytes written by the second
+ * process mean something else in the first.  The sender therefore adds the real UTF-16 text behind the ANSI
+ * string, and the receiver (Fs_FixDoubleStart, called as the message arrives) rewrites the ANSI string with
+ * its own slot numbers. */
+#define DBL_MSG 0x7400
+#define DBL_OFF 8192
+static HANDLE g_dbl_map;                             /* the mapping created by this (second) process */
+static HANDLE (WINAPI *o_CreateFileMappingA)(HANDLE, LPSECURITY_ATTRIBUTES, DWORD, DWORD, DWORD, LPCSTR);
+static HANDLE WINAPI f_CreateFileMappingA(HANDLE f, LPSECURITY_ATTRIBUTES sa, DWORD prot, DWORD hi, DWORD lo, LPCSTR name)
+{
+    HANDLE r = o_CreateFileMappingA(f, sa, prot, hi, lo, name);
+    DWORD err = GetLastError();
+    if (name && !lstrcmpA(name, "PeggyDoubleStart")) g_dbl_map = r;
+    SetLastError(err);
+    return r;
+}
+
+static BOOL (WINAPI *o_PostMessageA)(HWND, UINT, WPARAM, LPARAM);
+static BOOL WINAPI f_PostMessageA(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == DBL_MSG && g_dbl_map) {
+        BYTE *v = (BYTE *)MapViewOfFile(g_dbl_map, FILE_MAP_WRITE, 0, 0, 0);
+        if (v) {
+            const char *a = (const char *)v;
+            if (lstrlenA(a) < DBL_OFF - 4 && has_slot_z(a)) {
+                WCHAR *wide = wdup_all(a);
+                if (wide && (lstrlenW(wide) + 1) * 2 + 8 < 16384 - DBL_OFF) {
+                    memcpy(v + DBL_OFF + 8, wide, (lstrlenW(wide) + 1) * sizeof(WCHAR));
+                    memcpy(v + DBL_OFF, "U8SL", 4);
+                    Slot_Log("double start: sent %d UTF-16 chars", lstrlenW(wide));
+                }
+                HeapFree(GetProcessHeap(), 0, wide);
+            }
+            UnmapViewOfFile(v);
+        }
+    }
+    return o_PostMessageA(h, m, w, l);
+}
+
+void Fs_FixDoubleStart(void)                          /* receiver side: called from the window-procedure hook */
+{
+    HANDLE map = OpenFileMappingA(FILE_MAP_WRITE, FALSE, "PeggyDoubleStart");
+    BYTE *v = map ? (BYTE *)MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+    if (v && !memcmp(v + DBL_OFF, "U8SL", 4)) {
+        const WCHAR *wide = (const WCHAR *)(v + DBL_OFF + 8);
+        int need = Slot_WideCharToMultiByte(CP_ACP, 0, wide, -1, NULL, 0, NULL, NULL);
+        if (need > 0 && need < DBL_OFF) {
+            Slot_WideCharToMultiByte(CP_ACP, 0, wide, -1, (char *)v, need, NULL, NULL);
+            Slot_Log("double start: command line rewritten with this process's slots (%d bytes)", need - 1);
+        }
+        memset(v + DBL_OFF, 0, 8);
+    }
+    if (v) UnmapViewOfFile(v);
+    if (map) CloseHandle(map);
+}
+
 static BOOL (WINAPI *o_DeleteFileA)(LPCSTR);
 static BOOL WINAPI f_DeleteFileA(LPCSTR p)
 {
@@ -529,6 +587,8 @@ static FsHook g_fs[] = {
     { "KERNEL32.dll", "DeleteFileA",        (void *)f_DeleteFileA,        (void **)&o_DeleteFileA },
     { "KERNEL32.dll", "CreateDirectoryA",   (void *)f_CreateDirectoryA,   (void **)&o_CreateDirectoryA },
     { "KERNEL32.dll", "CreateProcessA",     (void *)f_CreateProcessA,     (void **)&o_CreateProcessA },
+    { "KERNEL32.dll", "CreateFileMappingA", (void *)f_CreateFileMappingA, (void **)&o_CreateFileMappingA },
+    { "USER32.dll",   "PostMessageA",       (void *)f_PostMessageA,       (void **)&o_PostMessageA },
     { "KERNEL32.dll", "GetCurrentDirectoryA", (void *)f_GetCurrentDirectoryA, (void **)&o_GetCurrentDirectoryA },
     { "KERNEL32.dll", "RemoveDirectoryA",   (void *)f_RemoveDirectoryA,   (void **)&o_RemoveDirectoryA },
     { "KERNEL32.dll", "MoveFileA",          (void *)f_MoveFileA,          (void **)&o_MoveFileA },

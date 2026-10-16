@@ -21,6 +21,7 @@ static struct { HWND h; WNDPROC old; } g_sub[MAXSUB];
 static HHOOK g_hook;
 void Dlg_NoteFindDlg(HWND h);
 void Dlg_PatchAbout(HWND h);
+void Fs_FixDoubleStart(void);
 int Dlg_TestGetWindowText(HWND h, char *buf, int cap);
 LRESULT Dlg_TestSendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static void log_menu_tree(HMENU m, int depth);
@@ -708,6 +709,13 @@ static void trace_wnd_msg(const CWPSTRUCT *c)
              IsWindowUnicode(c->hwnd), m, (unsigned)c->wParam, show ? "text=" : "", hex);
 }
 
+/* posted messages never pass through WH_CALLWNDPROC: a second launch hands its command line over with one */
+static LRESULT CALLBACK GetMsgHook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code >= 0 && lp && ((const MSG *)lp)->message == 0x7400) Fs_FixDoubleStart();
+    return CallNextHookEx(NULL, code, wp, lp);
+}
+
 static LRESULT CALLBACK CallWndHook(int code, WPARAM wp, LPARAM lp)
 {
     if (code >= 0) {
@@ -770,6 +778,7 @@ void Ime_Init(HINSTANCE inst)
     g_ui_tid = GetCurrentThreadId();
     if (GetEnvironmentVariableA("SLOT_SELFTEST", NULL, 0)) CreateThread(NULL, 0, SelfTestThread, NULL, 0, NULL);
     g_hook = SetWindowsHookExA(WH_CALLWNDPROC, CallWndHook, NULL, GetCurrentThreadId());
+    SetWindowsHookExA(WH_GETMESSAGE, GetMsgHook, NULL, GetCurrentThreadId());
     g_inst = inst;
     Slot_Log("Ime_Init: callwnd=%p", g_hook);
 }

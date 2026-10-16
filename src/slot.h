@@ -8,10 +8,11 @@ int WINAPI Slot_WideCharToMultiByte(UINT cp, DWORD fl, LPCWCH src, int cch, LPST
 void Slot_Init(void);
 int  Slot_Capacity(void);
 int  Slot_Used(void);
+void Slot_LoadPersisted(void);                       /* restore the slot assignments of earlier sessions */
 
 /* shown in the window title and the About box */
 #define SLOT_PATCH_NAME "UTF-8 Slot"
-#define SLOT_PATCH_VER  "1.1"
+#define SLOT_PATCH_VER  "1.2"
 /* if s[0..1] is an assigned slot pair: returns 2 and the code point, else 0 */
 int  Slot_DecodeAt(const char *s, int n, unsigned *cp);
 int  Slot_HasSupplementary(void);
